@@ -141,6 +141,11 @@ public class Repl implements QueryEngine.QueryCallback {
     }
 
     @Override
+    public void onReasoningDelta(String text) {
+        // Not displayed in terminal REPL
+    }
+
+    @Override
     public void onToolStart(String toolName, String toolUseId, String input) {
         System.out.println();
         println(ANSI_YELLOW + "⏺ " + toolName + ANSI_RESET);

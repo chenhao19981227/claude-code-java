@@ -10,7 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-public class AnthropicClient {
+public class AnthropicClient implements ApiClient {
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String API_VERSION = "2023-06-01";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -22,9 +22,15 @@ public class AnthropicClient {
     private final RetryHandler retryHandler;
 
     public AnthropicClient(String apiKey, String defaultModel) {
+        this(apiKey, defaultModel, null);
+    }
+
+    public AnthropicClient(String apiKey, String defaultModel, String baseUrl) {
         this.apiKey = apiKey;
         this.defaultModel = defaultModel != null ? defaultModel : "claude-sonnet-4-20250514";
-        this.baseUrl = System.getenv().getOrDefault("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+        this.baseUrl = (baseUrl != null && !baseUrl.trim().isEmpty())
+            ? baseUrl.trim()
+            : "https://api.anthropic.com";
         this.httpClient = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(300, TimeUnit.SECONDS)
@@ -300,4 +306,7 @@ public class AnthropicClient {
         if (s == null) return "";
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
+
+    @Override
+    public ApiProvider getProvider() { return ApiProvider.ANTHROPIC; }
 }

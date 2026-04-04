@@ -9,6 +9,7 @@ public interface StreamListener {
     void onContentBlockStop(Map<String, Object> data);
     void onMessageDelta(Map<String, Object> data);
     void onMessageStop(Map<String, Object> data);
+    void onReasoningDelta(String text);
     void onError(Throwable error);
     void onComplete();
 }

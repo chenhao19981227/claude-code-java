@@ -1,5 +1,7 @@
 package com.claude.code.context;
 
+import com.claude.code.api.ApiProvider;
+import com.claude.code.state.Settings;
 import com.claude.code.util.GitUtil;
 
 import java.util.ArrayList;
@@ -7,14 +9,24 @@ import java.util.List;
 
 public class SystemPromptBuilder {
     public static List<String> buildSystemPrompt(String workingDir) {
+        return buildSystemPrompt(workingDir, null);
+    }
+
+    public static List<String> buildSystemPrompt(String workingDir, Settings settings) {
         List<String> parts = new ArrayList<>();
-        parts.add(getClaudeCodeSystemPrompt());
+        parts.add(getSystemPrompt(settings));
         parts.add(getEnvironmentContext(workingDir));
         return parts;
     }
 
-    private static String getClaudeCodeSystemPrompt() {
-        return "You are Claude, an AI assistant by Anthropic. You are operating as Claude Code, an interactive CLI tool that helps users with programming tasks.\n\n" +
+    private static String getSystemPrompt(Settings settings) {
+        String provider = "unknown";
+        String model = "unknown";
+        if (settings != null) {
+            provider = settings.getProvider() != null ? settings.getProvider() : "unknown";
+            model = settings.getEffectiveModel() != null ? settings.getEffectiveModel() : "unknown";
+        }
+        return "You are an AI coding assistant powered by " + model + " (" + provider + "). You are operating as Claude Code, an interactive CLI tool that helps users with programming tasks.\n\n" +
                "You have access to tools that let you read files, edit files, run shell commands, search code, and manage tasks.\n\n" +
                "Key behaviors:\n" +
                "- Always read files before editing them\n" +
@@ -22,7 +34,8 @@ public class SystemPromptBuilder {
                "- Run commands with Bash tool to build, test, and run code\n" +
                "- Be concise in responses - don't explain unless asked\n" +
                "- When done, summarize what you did\n" +
-               "- If something is unclear, ask the user\n";
+               "- If something is unclear, ask the user\n" +
+               "- When asked about your identity, honestly state you are " + model + " by " + provider + ", not Claude or Anthropic\n";
     }
 
     private static String getEnvironmentContext(String workingDir) {

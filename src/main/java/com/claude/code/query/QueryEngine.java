@@ -5,6 +5,7 @@ import com.claude.code.context.SystemPromptBuilder;
 import com.claude.code.message.*;
 import com.claude.code.permission.PermissionChecker;
 import com.claude.code.permission.PermissionResult;
+import com.claude.code.state.Settings;
 import com.claude.code.state.AppState;
 import com.claude.code.state.Store;
 import com.claude.code.tool.*;
@@ -16,28 +17,38 @@ public class QueryEngine {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_TURNS = 50;
 
-    private final AnthropicClient client;
+    private final ApiClient client;
     private final ToolRegistry toolRegistry;
     private final PermissionChecker permissionChecker;
     private final Store<AppState> appStore;
     private final String workingDir;
+    private final Settings settings;
     private volatile boolean aborted;
 
     public interface QueryCallback {
         void onTextDelta(String text);
+        void onReasoningDelta(String text);
         void onToolStart(String toolName, String toolUseId, String input);
         void onToolResult(String toolUseId, String result, boolean isError);
         void onError(String error);
         void onComplete();
     }
 
-    public QueryEngine(String apiKey, String model, String workingDir) {
-        this.client = new AnthropicClient(apiKey, model);
+    public QueryEngine(ApiClient client, String workingDir) {
+        this(client, workingDir, null);
+    }
+
+    public QueryEngine(ApiClient client, String workingDir, Settings settings) {
+        this.client = client;
+        this.settings = settings;
         this.toolRegistry = new ToolRegistry();
         this.permissionChecker = new PermissionChecker(workingDir);
         this.workingDir = workingDir != null ? workingDir : System.getProperty("user.dir");
         this.appStore = new Store<>(new AppState());
         this.appStore.getState().setCurrentWorkingDirectory(this.workingDir);
+        if (settings != null) {
+            this.appStore.getState().setMainLoopModel(settings.getEffectiveModel());
+        }
         registerCoreTools();
     }
 
@@ -59,7 +70,7 @@ public class QueryEngine {
         state.addMessage(userMsg);
 
         // Build system prompt
-        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir);
+        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, settings);
 
         // Build messages for API
         List<Map<String, Object>> apiMessages = buildApiMessages(state.getMessages());
@@ -125,7 +136,9 @@ public class QueryEngine {
             }
 
             @Override public void onContentBlockStop(Map<String, Object> data) {
-                int index = ((Number) data.get("index")).intValue();
+                Object indexObj = data.get("index");
+                if (indexObj == null) return;
+                int index = ((Number) indexObj).intValue();
                 String toolUseId = toolUseIds.get(index);
                 String toolName = toolNames.get(index);
                 String inputJson = toolInputBuilders.containsKey(index) ? toolInputBuilders.get(index).toString() : "{}";
@@ -145,6 +158,10 @@ public class QueryEngine {
             }
 
             @Override public void onMessageStop(Map<String, Object> data) {}
+
+            @Override public void onReasoningDelta(String text) {
+                callback.onReasoningDelta(text);
+            }
 
             @Override public void onError(Throwable error) {
                 callback.onError(error.getMessage());
@@ -186,9 +203,10 @@ public class QueryEngine {
         // Execute each tool
         for (Map.Entry<Integer, String> e : toolUseIds.entrySet()) {
             if (aborted) break;
-            String toolName = e.getValue();
-            String toolUseId = e.getKey().toString();
-            String inputJson = toolInputBuilders.get(e.getKey()).toString();
+            int index = e.getKey();
+            String toolUseId = e.getValue();
+            String toolName = toolNames.get(index);
+            String inputJson = toolInputBuilders.containsKey(index) ? toolInputBuilders.get(index).toString() : "{}";
 
             Tool tool = toolRegistry.findByName(toolName);
             if (tool == null) {
@@ -218,6 +236,7 @@ public class QueryEngine {
 
             // Execute tool
             try {
+                callback.onToolStart(toolName, toolUseId, inputJson);
                 ToolResult result = tool.call(inputJson, toolContext);
                 String resultJson = result.getDataAsJson();
                 callback.onToolResult(toolUseId, resultJson, result.isError());
