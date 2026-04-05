@@ -6,3 +6,4 @@ target/
 *.iml
 /web/
 .DS_Store
+config.yaml

@@ -2,9 +2,16 @@ package com.claude.code.query;
 
 import com.claude.code.api.*;
 import com.claude.code.context.SystemPromptBuilder;
+import com.claude.code.mcp.McpManager;
 import com.claude.code.message.*;
 import com.claude.code.permission.PermissionChecker;
 import com.claude.code.permission.PermissionResult;
+import com.claude.code.session.Session;
+import com.claude.code.session.SessionManager;
+import com.claude.code.session.SessionMessage;
+import com.claude.code.skill.Skill;
+import com.claude.code.skill.SkillLoader;
+import com.claude.code.skill.SkillMatcher;
 import com.claude.code.state.Settings;
 import com.claude.code.state.AppState;
 import com.claude.code.state.Store;
@@ -23,7 +30,13 @@ public class QueryEngine {
     private final Store<AppState> appStore;
     private final String workingDir;
     private final Settings settings;
+    private SessionManager sessionManager;
+    private Session currentSession;
     private volatile boolean aborted;
+    private SkillLoader skillLoader;
+    private SkillMatcher skillMatcher;
+    private List<Skill> allSkills;
+    private McpManager mcpManager;
 
     public interface QueryCallback {
         void onTextDelta(String text);
@@ -46,10 +59,14 @@ public class QueryEngine {
         this.workingDir = workingDir != null ? workingDir : System.getProperty("user.dir");
         this.appStore = new Store<>(new AppState());
         this.appStore.getState().setCurrentWorkingDirectory(this.workingDir);
+        this.sessionManager = new SessionManager(this.workingDir);
+        this.currentSession = null;
         if (settings != null) {
             this.appStore.getState().setMainLoopModel(settings.getEffectiveModel());
         }
         registerCoreTools();
+        initSkills();
+        initMcpServers();
     }
 
     private void registerCoreTools() {
@@ -61,16 +78,60 @@ public class QueryEngine {
         toolRegistry.register(new TodoWriteTool());
     }
 
+    private void initSkills() {
+        if (settings != null && settings.getSkillDirectories() != null && !settings.getSkillDirectories().isEmpty()) {
+            skillLoader = new SkillLoader(settings.getSkillDirectories());
+            skillMatcher = new SkillMatcher();
+            allSkills = skillLoader.loadAllSkills();
+            System.out.println("Loaded " + allSkills.size() + " skills from " + settings.getSkillDirectories().size() + " directories");
+        } else {
+            // Use default skill directory
+            skillLoader = new SkillLoader(new ArrayList<String>());
+            skillMatcher = new SkillMatcher();
+            allSkills = skillLoader.loadAllSkills();
+            if (!allSkills.isEmpty()) {
+                System.out.println("Loaded " + allSkills.size() + " skills from default directories");
+            }
+        }
+    }
+
+    private void initMcpServers() {
+        if (settings != null && settings.getMcpServers() != null && !settings.getMcpServers().isEmpty()) {
+            mcpManager = new McpManager();
+            mcpManager.init(settings.getMcpServerConfigs());
+            for (Tool adapter : mcpManager.getToolAdapters()) {
+                toolRegistry.register(adapter);
+            }
+        }
+    }
+
     public void submitMessage(String userInput, final QueryCallback callback) {
         if (userInput == null || userInput.trim().isEmpty()) return;
         aborted = false;
+
+        // Auto-create session if none exists
+        if (currentSession == null) {
+            String title = userInput.length() > 50 ? userInput.substring(0, 50) : userInput;
+            currentSession = sessionManager.createSession(title);
+        } else if (currentSession.getTitle().equals("New Session") || currentSession.getMessages().isEmpty()) {
+            // Auto-title from first user message
+            String title = userInput.length() > 50 ? userInput.substring(0, 50) : userInput;
+            currentSession.setTitle(title);
+        }
 
         AppState state = appStore.getState();
         UserMessage userMsg = new UserMessage(userInput);
         state.addMessage(userMsg);
 
-        // Build system prompt
-        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, settings);
+        // Record in session
+        currentSession.addMessage(new SessionMessage("user", userInput));
+
+        // Build system prompt with relevant skills
+        List<Skill> relevantSkills = null;
+        if (skillMatcher != null && allSkills != null && !allSkills.isEmpty()) {
+            relevantSkills = skillMatcher.findRelevantSkills(userInput, allSkills);
+        }
+        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, settings, relevantSkills);
 
         // Build messages for API
         List<Map<String, Object>> apiMessages = buildApiMessages(state.getMessages());
@@ -177,12 +238,19 @@ public class QueryEngine {
                         assistantMsg.addToolUseBlock(new ToolUseBlock(e.getValue(), toolNames.get(e.getValue()), toolInputBuilders.getOrDefault(e.getKey(), new StringBuilder()).toString()));
                     }
                     state.addMessage(assistantMsg);
+
+                    // Record assistant message in session
+                    if (currentSession != null) {
+                        currentSession.addMessage(new SessionMessage("assistant", textBuffer.toString()));
+                    }
                 }
 
                 // If there were tool calls, execute them and continue
                 if (!toolUseIds.isEmpty() && !aborted) {
                     executeToolsAndContinue(toolUseIds, toolNames, toolInputBuilders, callback, turn, request, pendingToolResults);
                 } else {
+                    // Auto-save session on completion
+                    saveCurrentSession();
                     callback.onComplete();
                 }
             }
@@ -365,7 +433,109 @@ public class QueryEngine {
         return msg;
     }
 
-    public void abort() { aborted = true; }
+    /**
+     * Create a new session, clearing current messages.
+     */
+    public Session newSession() {
+        currentSession = sessionManager.createSession("New Session");
+        appStore.getState().clearMessages();
+        return currentSession;
+    }
+
+    /**
+     * Load an existing session by ID, populating messages.
+     */
+    public Session loadSession(String id) {
+        Session session = sessionManager.loadSession(id);
+        if (session == null) return null;
+        currentSession = session;
+
+        // Populate app messages from session
+        AppState state = appStore.getState();
+        state.clearMessages();
+        for (SessionMessage sm : session.getMessages()) {
+            if ("user".equals(sm.getRole())) {
+                state.addMessage(new UserMessage(sm.getContent()));
+            } else if ("assistant".equals(sm.getRole())) {
+                state.addMessage(new AssistantMessage(sm.getContent()));
+            }
+        }
+        return session;
+    }
+
+    /**
+     * Get current session ID, or null if no session is active.
+     */
+    public String getCurrentSessionId() {
+        return currentSession != null ? currentSession.getId() : null;
+    }
+
+    /**
+     * Get current session, or null.
+     */
+    public Session getCurrentSession() {
+        return currentSession;
+    }
+
+    /**
+     * List all sessions as summary (metadata only).
+     */
+    public List<Map<String, Object>> listSessions() {
+        List<Session> sessions = sessionManager.listSessionsSummary();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Session s : sessions) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", s.getId());
+            m.put("title", s.getTitle());
+            m.put("createdAt", s.getCreatedAt());
+            m.put("updatedAt", s.getUpdatedAt());
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Delete a session by ID.
+     */
+    public boolean deleteSession(String id) {
+        sessionManager.deleteSession(id);
+        if (currentSession != null && currentSession.getId().equals(id)) {
+            currentSession = null;
+            appStore.getState().clearMessages();
+        }
+        return true;
+    }
+
+    /**
+     * Rename a session.
+     */
+    public boolean renameSession(String id, String title) {
+        Session session = sessionManager.loadSession(id);
+        if (session == null) return false;
+        session.setTitle(title);
+        sessionManager.saveSession(session);
+        if (currentSession != null && currentSession.getId().equals(id)) {
+            currentSession.setTitle(title);
+        }
+        return true;
+    }
+
+    private void saveCurrentSession() {
+        if (currentSession != null) {
+            try {
+                sessionManager.saveSession(currentSession);
+            } catch (Exception e) {
+                System.err.println("[QueryEngine] Failed to save session: " + e.getMessage());
+            }
+        }
+    }
+
+    public void abort() {
+        aborted = true;
+        if (mcpManager != null) {
+            mcpManager.shutdown();
+        }
+    }
     public Store<AppState> getAppStore() { return appStore; }
     public ToolRegistry getToolRegistry() { return toolRegistry; }
     public PermissionChecker getPermissionChecker() { return permissionChecker; }
