@@ -82,6 +82,7 @@ public class OpenAiCompatibleClient implements ApiClient {
             });
         } catch (Exception e) {
             listener.onError(e);
+            listener.onComplete();
         }
     }
 

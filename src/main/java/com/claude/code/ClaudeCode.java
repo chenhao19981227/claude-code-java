@@ -32,14 +32,12 @@ public class ClaudeCode {
         if (!settings.hasApiKey()) {
             System.err.println("Error: API key not configured.");
             System.err.println();
-            System.err.println("Edit config file: " + Settings.getConfigPath());
+            System.err.println("Edit config file: " + Settings.getProjectConfigPath());
             System.err.println();
-            System.err.println("Example config:");
-            System.err.println("  {");
-            System.err.println("    \"provider\": \"glm\",");
-            System.err.println("    \"apiKey\": \"your-api-key-here\",");
-            System.err.println("    \"mainModel\": \"glm-4\"");
-            System.err.println("  }");
+            System.err.println("Example config.yaml:");
+            System.err.println("  provider: glm");
+            System.err.println("  apiKey: your-api-key-here");
+            System.err.println("  mainModel: glm-4");
             System.err.println();
             System.err.println("Supported providers: glm, deepseek, openai, anthropic");
             System.exit(1);
@@ -81,7 +79,7 @@ public class ClaudeCode {
         System.out.println("  --version, -v        Show version");
         System.out.println("  --help, -h           Show this help");
         System.out.println();
-        System.out.println("Config file: " + Settings.getConfigPath());
+        System.out.println("Config file: " + Settings.getProjectConfigPath());
         System.out.println();
         System.out.println("Config fields:");
         System.out.println("  provider       LLM provider: glm, deepseek, openai, anthropic (default: glm)");
@@ -94,12 +92,10 @@ public class ClaudeCode {
         System.out.println("  systemPrompt   Custom system prompt (optional)");
         System.out.println("  customInstructions  Extra instructions appended to system prompt");
         System.out.println();
-        System.out.println("Example config.json:");
-        System.out.println("  {");
-        System.out.println("    \"provider\": \"glm\",");
-        System.out.println("    \"apiKey\": \"your-key-here\",");
-        System.out.println("    \"mainModel\": \"glm-4\",");
-        System.out.println("    \"maxTokens\": 8192");
-        System.out.println("  }");
+        System.out.println("Example config.yaml:");
+        System.out.println("  provider: glm");
+        System.out.println("  apiKey: your-key-here");
+        System.out.println("  mainModel: glm-4");
+        System.out.println("  maxTokens: 8192");
     }
 }
