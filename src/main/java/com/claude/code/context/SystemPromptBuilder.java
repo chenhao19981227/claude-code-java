@@ -1,6 +1,7 @@
 package com.claude.code.context;
 
 import com.claude.code.api.ApiProvider;
+import com.claude.code.skill.Skill;
 import com.claude.code.state.Settings;
 import com.claude.code.util.GitUtil;
 
@@ -9,13 +10,20 @@ import java.util.List;
 
 public class SystemPromptBuilder {
     public static List<String> buildSystemPrompt(String workingDir) {
-        return buildSystemPrompt(workingDir, null);
+        return buildSystemPrompt(workingDir, null, null);
     }
 
     public static List<String> buildSystemPrompt(String workingDir, Settings settings) {
+        return buildSystemPrompt(workingDir, settings, null);
+    }
+
+    public static List<String> buildSystemPrompt(String workingDir, Settings settings, List<Skill> relevantSkills) {
         List<String> parts = new ArrayList<>();
         parts.add(getSystemPrompt(settings));
         parts.add(getEnvironmentContext(workingDir));
+        if (relevantSkills != null && !relevantSkills.isEmpty()) {
+            parts.add(getSkillsSection(relevantSkills));
+        }
         return parts;
     }
 
@@ -56,6 +64,16 @@ public class SystemPromptBuilder {
         }
 
         sb.append("</environment_details>");
+        return sb.toString();
+    }
+
+    private static String getSkillsSection(List<Skill> skills) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## Active Skills\n");
+        for (Skill skill : skills) {
+            sb.append("\n### ").append(skill.getName()).append("\n");
+            sb.append(skill.getContent()).append("\n");
+        }
         return sb.toString();
     }
 }
