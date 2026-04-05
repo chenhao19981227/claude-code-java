@@ -4,8 +4,14 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
 public class Store<T> {
+    @FunctionalInterface
     public interface Listener<T> {
         void onChanged(T newState, T oldState);
+    }
+
+    @FunctionalInterface
+    public interface StateUpdater<T> {
+        T update(T currentState);
     }
 
     private volatile T state;
@@ -22,7 +28,7 @@ public class Store<T> {
         T newState = updater.update(oldState);
         if (newState != oldState) {
             this.state = newState;
-            for (Listener<T> listener : listeners) {
+            for (var listener : listeners) {
                 listener.onChanged(newState, oldState);
             }
         }
@@ -30,8 +36,4 @@ public class Store<T> {
 
     public void subscribe(Listener<T> listener) { listeners.add(listener); }
     public void unsubscribe(Listener<T> listener) { listeners.remove(listener); }
-
-    public interface StateUpdater<T> {
-        T update(T currentState);
-    }
 }

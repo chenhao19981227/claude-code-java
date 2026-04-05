@@ -31,77 +31,60 @@ public class PermissionChecker {
     public void addAskRule(PermissionRule rule) { askRules.add(rule); }
 
     public PermissionResult checkPermission(String toolName, String input, String filePath) {
-        // 1. Bypass mode - allow everything
         if (mode.isBypass()) {
             return PermissionResult.allow(input, PermissionDecisionReason.mode("bypassPermissions"));
         }
 
-        // 2. Check deny rules
-        for (PermissionRule rule : denyRules) {
+        for (var rule : denyRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.deny(
                     "Tool '" + toolName + "' is denied by rule",
-                    PermissionDecisionReason.rule(rule.getRuleContent())
-                );
+                    PermissionDecisionReason.rule(rule.getRuleContent()));
             }
         }
 
-        // 3. Check ask rules
-        for (PermissionRule rule : askRules) {
+        for (var rule : askRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.ask(
                     "Tool '" + toolName + "' requires approval: " + rule.getRuleContent(),
-                    PermissionDecisionReason.rule(rule.getRuleContent())
-                );
+                    PermissionDecisionReason.rule(rule.getRuleContent()));
             }
         }
 
-        // 4. Check dangerous paths for write operations
         if (filePath != null && !isReadOnlyTool(toolName)) {
             PermissionResult safetyCheck = checkPathSafety(filePath);
             if (safetyCheck != null) return safetyCheck;
         }
 
-        // 5. Check allow rules
-        for (PermissionRule rule : allowRules) {
+        for (var rule : allowRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.allow(input, PermissionDecisionReason.rule(rule.getRuleContent()));
             }
         }
 
-        // 6. Mode-based default
-        switch (mode) {
-            case ACCEPT_EDITS:
-                return PermissionResult.allow(input, PermissionDecisionReason.mode("acceptEdits"));
-            case PLAN:
-                if (isReadOnlyTool(toolName)) {
-                    return PermissionResult.allow(input, PermissionDecisionReason.mode("plan"));
-                }
-                return PermissionResult.deny("Tool '" + toolName + "' is not allowed in plan mode", PermissionDecisionReason.mode("plan"));
-            case DONT_ASK:
-                return PermissionResult.deny("Tool '" + toolName + "' not explicitly allowed", PermissionDecisionReason.mode("dontAsk"));
-            case AUTO:
-                // In auto mode, default to ask for non-read-only tools
-                if (isReadOnlyTool(toolName)) {
-                    return PermissionResult.allow(input, PermissionDecisionReason.mode("auto"));
-                }
-                return PermissionResult.ask("Allow " + toolName + "?", PermissionDecisionReason.mode("auto"));
-            default:
-                return PermissionResult.ask("Allow " + toolName + "?", PermissionDecisionReason.mode("default"));
-        }
+        return switch (mode) {
+            case ACCEPT_EDITS -> PermissionResult.allow(input, PermissionDecisionReason.mode("acceptEdits"));
+            case PLAN -> {
+                if (isReadOnlyTool(toolName)) yield PermissionResult.allow(input, PermissionDecisionReason.mode("plan"));
+                yield PermissionResult.deny("Tool '" + toolName + "' is not allowed in plan mode", PermissionDecisionReason.mode("plan"));
+            }
+            case DONT_ASK -> PermissionResult.deny("Tool '" + toolName + "' not explicitly allowed", PermissionDecisionReason.mode("dontAsk"));
+            case AUTO -> {
+                if (isReadOnlyTool(toolName)) yield PermissionResult.allow(input, PermissionDecisionReason.mode("auto"));
+                yield PermissionResult.ask("Allow " + toolName + "?", PermissionDecisionReason.mode("auto"));
+            }
+            default -> PermissionResult.ask("Allow " + toolName + "?", PermissionDecisionReason.mode("default"));
+        };
     }
 
     private boolean matchesContent(PermissionRule rule, String input, String filePath) {
         if (rule.getRuleContent() == null || rule.getRuleContent().isEmpty()) return true;
+        String pattern = rule.getRuleContent().replace(".", "\\.").replace("*", ".*");
         if (filePath != null) {
-            String pattern = rule.getRuleContent().replace(".", "\\.").replace("*", ".*");
             if (Pattern.matches(pattern, filePath)) return true;
             if (Pattern.matches(pattern, new File(filePath).getName())) return true;
         }
-        if (input != null) {
-            String pattern = rule.getRuleContent().replace(".", "\\.").replace("*", ".*");
-            if (Pattern.matches(pattern, input)) return true;
-        }
+        if (input != null && Pattern.matches(pattern, input)) return true;
         return false;
     }
 
@@ -109,24 +92,22 @@ public class PermissionChecker {
         String normalized = new File(path).getAbsolutePath().replace("\\", "/");
         String[] parts = normalized.split("/");
 
-        for (String dangerousDir : DANGEROUS_DIRS) {
-            for (String part : parts) {
+        for (var dangerousDir : DANGEROUS_DIRS) {
+            for (var part : parts) {
                 if (part.equals(dangerousDir)) {
                     return PermissionResult.ask(
                         "Path contains '" + dangerousDir + "' which is a protected directory",
-                        PermissionDecisionReason.safetyCheck("protected_directory")
-                    );
+                        PermissionDecisionReason.safetyCheck("protected_directory"));
                 }
             }
         }
 
         String fileName = parts[parts.length - 1];
-        for (String dangerousFile : DANGEROUS_FILES) {
+        for (var dangerousFile : DANGEROUS_FILES) {
             if (fileName.equals(dangerousFile)) {
                 return PermissionResult.ask(
                     "File '" + dangerousFile + "' is protected",
-                    PermissionDecisionReason.safetyCheck("protected_file")
-                );
+                    PermissionDecisionReason.safetyCheck("protected_file"));
             }
         }
         return null;

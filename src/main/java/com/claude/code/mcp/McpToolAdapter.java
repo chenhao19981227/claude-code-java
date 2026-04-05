@@ -16,39 +16,32 @@ public class McpToolAdapter extends Tool {
     private final String inputSchemaJson;
 
     public McpToolAdapter(McpClient client, McpTool mcpTool) {
-        super("mcp_" + client.getServerName() + "_" + mcpTool.getName(),
-              mcpTool.getDescription());
+        super("mcp_" + client.getServerName() + "_" + mcpTool.name(),
+              mcpTool.description());
         this.client = client;
-        this.mcpToolName = mcpTool.getName();
-        this.inputSchemaJson = mcpTool.getInputSchema();
+        this.mcpToolName = mcpTool.name();
+        this.inputSchemaJson = mcpTool.inputSchema();
     }
 
     @Override
     public ToolResult call(String inputJson, ToolUseContext context) throws Exception {
         Map<String, Object> args;
         try {
-            args = MAPPER.readValue(inputJson, new TypeReference<Map<String, Object>>() {});
+            args = MAPPER.readValue(inputJson, new TypeReference<>() {});
         } catch (Exception e) {
-            args = new java.util.HashMap<String, Object>();
+            args = new java.util.HashMap<>();
         }
 
         McpToolResult result = client.callTool(mcpToolName, args);
         if (result.isError()) {
-            return ToolResult.error(result.getContent());
+            return ToolResult.error(result.content());
         }
-        return ToolResult.success(result.getContent());
+        return ToolResult.success(result.content());
     }
 
     @Override
-    public String getInputSchemaJson() {
-        return inputSchemaJson;
-    }
+    public String getInputSchemaJson() { return inputSchemaJson; }
 
-    public McpClient getClient() {
-        return client;
-    }
-
-    public String getMcpToolName() {
-        return mcpToolName;
-    }
+    public McpClient getClient() { return client; }
+    public String getMcpToolName() { return mcpToolName; }
 }

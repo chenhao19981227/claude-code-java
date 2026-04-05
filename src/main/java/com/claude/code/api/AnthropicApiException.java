@@ -1,7 +1,5 @@
 package com.claude.code.api;
 
-import java.util.Map;
-
 public class AnthropicApiException extends Exception {
     private final int statusCode;
     private final String errorType;

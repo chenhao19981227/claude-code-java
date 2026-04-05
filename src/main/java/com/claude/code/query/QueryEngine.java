@@ -1,26 +1,32 @@
 package com.claude.code.query;
 
 import com.claude.code.api.*;
+import com.claude.code.config.AppProperties;
 import com.claude.code.context.SystemPromptBuilder;
-import com.claude.code.mcp.McpManager;
 import com.claude.code.message.*;
+import com.claude.code.mcp.McpManager;
+import com.claude.code.model.entity.SessionEntity;
+import com.claude.code.model.entity.SessionMessageEntity;
 import com.claude.code.permission.PermissionChecker;
 import com.claude.code.permission.PermissionResult;
-import com.claude.code.session.Session;
-import com.claude.code.session.SessionManager;
-import com.claude.code.session.SessionMessage;
+import com.claude.code.service.SessionService;
 import com.claude.code.skill.Skill;
 import com.claude.code.skill.SkillLoader;
 import com.claude.code.skill.SkillMatcher;
-import com.claude.code.state.Settings;
 import com.claude.code.state.AppState;
 import com.claude.code.state.Store;
 import com.claude.code.tool.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
 
 import java.util.*;
 
+@Service
 public class QueryEngine {
+    private static final Logger log = LoggerFactory.getLogger(QueryEngine.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_TURNS = 50;
 
@@ -28,15 +34,16 @@ public class QueryEngine {
     private final ToolRegistry toolRegistry;
     private final PermissionChecker permissionChecker;
     private final Store<AppState> appStore;
+    private final SessionService sessionService;
+    private final AppProperties appProperties;
+    private final SkillLoader skillLoader;
+    private final McpManager mcpManager;
+    private final SkillMatcher skillMatcher;
     private final String workingDir;
-    private final Settings settings;
-    private SessionManager sessionManager;
-    private Session currentSession;
+
+    private SessionEntity currentSession;
     private volatile boolean aborted;
-    private SkillLoader skillLoader;
-    private SkillMatcher skillMatcher;
     private List<Skill> allSkills;
-    private McpManager mcpManager;
 
     public interface QueryCallback {
         void onTextDelta(String text);
@@ -47,62 +54,30 @@ public class QueryEngine {
         void onComplete();
     }
 
-    public QueryEngine(ApiClient client, String workingDir) {
-        this(client, workingDir, null);
-    }
-
-    public QueryEngine(ApiClient client, String workingDir, Settings settings) {
+    public QueryEngine(ApiClient client, ToolRegistry toolRegistry,
+                       SessionService sessionService, AppProperties appProperties,
+                       SkillLoader skillLoader, McpManager mcpManager) {
         this.client = client;
-        this.settings = settings;
-        this.toolRegistry = new ToolRegistry();
+        this.toolRegistry = toolRegistry;
+        this.sessionService = sessionService;
+        this.appProperties = appProperties;
+        this.skillLoader = skillLoader;
+        this.mcpManager = mcpManager;
+        this.workingDir = System.getProperty("user.dir");
         this.permissionChecker = new PermissionChecker(workingDir);
-        this.workingDir = workingDir != null ? workingDir : System.getProperty("user.dir");
-        this.appStore = new Store<>(new AppState());
-        this.appStore.getState().setCurrentWorkingDirectory(this.workingDir);
-        this.sessionManager = new SessionManager(this.workingDir);
-        this.currentSession = null;
-        if (settings != null) {
-            this.appStore.getState().setMainLoopModel(settings.getEffectiveModel());
-        }
-        registerCoreTools();
-        initSkills();
-        initMcpServers();
+        this.appStore = new Store<>(new AppState(appProperties));
+        this.appStore.getState().setCurrentWorkingDirectory(workingDir);
+        this.skillMatcher = new SkillMatcher();
     }
 
-    private void registerCoreTools() {
-        toolRegistry.register(new BashTool());
-        toolRegistry.register(new FileReadTool());
-        toolRegistry.register(new FileEditTool());
-        toolRegistry.register(new GlobTool());
-        toolRegistry.register(new GrepTool());
-        toolRegistry.register(new TodoWriteTool());
-    }
-
-    private void initSkills() {
-        if (settings != null && settings.getSkillDirectories() != null && !settings.getSkillDirectories().isEmpty()) {
-            skillLoader = new SkillLoader(settings.getSkillDirectories());
-            skillMatcher = new SkillMatcher();
-            allSkills = skillLoader.loadAllSkills();
-            System.out.println("Loaded " + allSkills.size() + " skills from " + settings.getSkillDirectories().size() + " directories");
-        } else {
-            // Use default skill directory
-            skillLoader = new SkillLoader(new ArrayList<String>());
-            skillMatcher = new SkillMatcher();
-            allSkills = skillLoader.loadAllSkills();
-            if (!allSkills.isEmpty()) {
-                System.out.println("Loaded " + allSkills.size() + " skills from default directories");
-            }
+    @PostConstruct
+    public void init() {
+        // Register MCP tool adapters
+        for (var adapter : mcpManager.getToolAdapters()) {
+            toolRegistry.register(adapter);
         }
-    }
-
-    private void initMcpServers() {
-        if (settings != null && settings.getMcpServers() != null && !settings.getMcpServers().isEmpty()) {
-            mcpManager = new McpManager();
-            mcpManager.init(settings.getMcpServerConfigs());
-            for (Tool adapter : mcpManager.getToolAdapters()) {
-                toolRegistry.register(adapter);
-            }
-        }
+        // Load skills
+        allSkills = skillLoader.loadAllSkills();
     }
 
     public void submitMessage(String userInput, final QueryCallback callback) {
@@ -112,26 +87,26 @@ public class QueryEngine {
         // Auto-create session if none exists
         if (currentSession == null) {
             String title = userInput.length() > 50 ? userInput.substring(0, 50) : userInput;
-            currentSession = sessionManager.createSession(title);
-        } else if (currentSession.getTitle().equals("New Session") || currentSession.getMessages().isEmpty()) {
-            // Auto-title from first user message
+            currentSession = sessionService.createSession(title);
+        } else if ("New Session".equals(currentSession.getTitle()) || currentSession.getMessages().isEmpty()) {
             String title = userInput.length() > 50 ? userInput.substring(0, 50) : userInput;
+            sessionService.renameSession(currentSession.getSessionId(), title);
             currentSession.setTitle(title);
         }
 
         AppState state = appStore.getState();
-        UserMessage userMsg = new UserMessage(userInput);
+        var userMsg = new UserMessage(userInput);
         state.addMessage(userMsg);
 
-        // Record in session
-        currentSession.addMessage(new SessionMessage("user", userInput));
+        // Record in session via JPA
+        sessionService.addMessage(currentSession.getSessionId(), "user", userInput);
 
         // Build system prompt with relevant skills
         List<Skill> relevantSkills = null;
-        if (skillMatcher != null && allSkills != null && !allSkills.isEmpty()) {
+        if (allSkills != null && !allSkills.isEmpty()) {
             relevantSkills = skillMatcher.findRelevantSkills(userInput, allSkills);
         }
-        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, settings, relevantSkills);
+        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, appProperties, relevantSkills);
 
         // Build messages for API
         List<Map<String, Object>> apiMessages = buildApiMessages(state.getMessages());
@@ -139,16 +114,16 @@ public class QueryEngine {
         // Build tools
         List<Map<String, Object>> apiTools = buildApiTools();
 
-        // Create stream request
-        StreamRequest request = new StreamRequest.Builder()
+        var request = new StreamRequest.Builder()
             .model(state.getMainLoopModel())
             .systemPrompt(systemPrompt)
             .messages(apiMessages)
             .tools(apiTools)
             .stream(true)
+            .temperature(appProperties.getTemperature())
+            .maxTokens(appProperties.getMaxTokens())
             .build();
 
-        // Stream and handle tool calls in a loop
         executeQueryLoop(request, callback, 0);
     }
 
@@ -189,7 +164,7 @@ public class QueryEngine {
                     callback.onTextDelta(text);
                 } else if ("input_json_delta".equals(type)) {
                     int index = ((Number) data.get("index")).intValue();
-                    StringBuilder inputBuilder = toolInputBuilders.get(index);
+                    var inputBuilder = toolInputBuilders.get(index);
                     if (inputBuilder != null) {
                         inputBuilder.append(String.valueOf(delta.get("partial_json")));
                     }
@@ -208,15 +183,7 @@ public class QueryEngine {
                 }
             }
 
-            @Override public void onMessageDelta(Map<String, Object> data) {
-                Map<String, Object> delta = getMap(data, "delta");
-                if (delta != null && delta.containsKey("stop_reason")) {
-                    String stopReason = String.valueOf(delta.get("stop_reason"));
-                    if ("end_turn".equals(stopReason)) {
-                        // Normal completion
-                    }
-                }
-            }
+            @Override public void onMessageDelta(Map<String, Object> data) {}
 
             @Override public void onMessageStop(Map<String, Object> data) {}
 
@@ -231,26 +198,23 @@ public class QueryEngine {
             @Override public void onComplete() {
                 AppState state = appStore.getState();
 
-                // Save assistant text
                 if (textBuffer.length() > 0) {
-                    AssistantMessage assistantMsg = new AssistantMessage(textBuffer.toString());
-                    for (Map.Entry<Integer, String> e : toolUseIds.entrySet()) {
-                        assistantMsg.addToolUseBlock(new ToolUseBlock(e.getValue(), toolNames.get(e.getValue()), toolInputBuilders.getOrDefault(e.getKey(), new StringBuilder()).toString()));
+                    var assistantMsg = new AssistantMessage(textBuffer.toString());
+                    for (var e : toolUseIds.entrySet()) {
+                        assistantMsg.addToolUseBlock(new ToolUseBlock(
+                            e.getValue(), toolNames.get(e.getValue()),
+                            toolInputBuilders.getOrDefault(e.getKey(), new StringBuilder()).toString()));
                     }
                     state.addMessage(assistantMsg);
 
-                    // Record assistant message in session
                     if (currentSession != null) {
-                        currentSession.addMessage(new SessionMessage("assistant", textBuffer.toString()));
+                        sessionService.addMessage(currentSession.getSessionId(), "assistant", textBuffer.toString());
                     }
                 }
 
-                // If there were tool calls, execute them and continue
                 if (!toolUseIds.isEmpty() && !aborted) {
                     executeToolsAndContinue(toolUseIds, toolNames, toolInputBuilders, callback, turn, request, pendingToolResults);
                 } else {
-                    // Auto-save session on completion
-                    saveCurrentSession();
                     callback.onComplete();
                 }
             }
@@ -262,14 +226,13 @@ public class QueryEngine {
                                            final QueryCallback callback, int turn, StreamRequest request,
                                            List<Map<String, Object>> pendingToolResults) {
         AppState state = appStore.getState();
-        ToolUseContext toolContext = new ToolUseContext();
+        var toolContext = new ToolUseContext();
         toolContext.setWorkingDirectory(workingDir);
         toolContext.setPermissionChecker(permissionChecker);
         toolContext.setAppStore(appStore);
-        toolContext.setAllTools(toolRegistry.getEnabledTools(state));
+        toolContext.setAllTools(toolRegistry.getEnabledTools());
 
-        // Execute each tool
-        for (Map.Entry<Integer, String> e : toolUseIds.entrySet()) {
+        for (var e : toolUseIds.entrySet()) {
             if (aborted) break;
             int index = e.getKey();
             String toolUseId = e.getValue();
@@ -283,7 +246,6 @@ public class QueryEngine {
                 continue;
             }
 
-            // Check permissions
             PermissionResult permResult = tool.checkPermissions(inputJson, toolContext);
             if (permResult.isDeny()) {
                 callback.onToolResult(toolUseId, "Denied: " + permResult.getMessage(), true);
@@ -291,7 +253,6 @@ public class QueryEngine {
                 continue;
             }
 
-            // Auto-allow for read-only tools
             if (permResult.isAsk() && tool.isReadOnly()) {
                 permResult = PermissionResult.allow();
             }
@@ -302,7 +263,6 @@ public class QueryEngine {
                 continue;
             }
 
-            // Execute tool
             try {
                 callback.onToolStart(toolName, toolUseId, inputJson);
                 ToolResult result = tool.call(inputJson, toolContext);
@@ -316,43 +276,42 @@ public class QueryEngine {
             }
         }
 
-        // Build next request with tool results
         List<Map<String, Object>> newMessages = buildApiMessages(state.getMessages());
         newMessages.addAll(pendingToolResults);
 
-        StreamRequest nextRequest = new StreamRequest.Builder()
+        var nextRequest = new StreamRequest.Builder()
             .model(state.getMainLoopModel())
             .systemPrompt(request.getSystemPrompt())
             .messages(newMessages)
             .tools(request.getTools())
             .stream(true)
+            .temperature(appProperties.getTemperature())
+            .maxTokens(appProperties.getMaxTokens())
             .build();
 
-        // Continue loop
         executeQueryLoop(nextRequest, callback, turn + 1);
     }
 
+    @SuppressWarnings("unchecked")
     private List<Map<String, Object>> buildApiMessages(List<Message> messages) {
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Message msg : messages) {
-            if (msg instanceof UserMessage) {
-                UserMessage um = (UserMessage) msg;
+        var result = new ArrayList<Map<String, Object>>();
+        for (var msg : messages) {
+            if (msg instanceof UserMessage um) {
                 if (um.getToolResults().isEmpty()) {
                     result.add(createApiMessage("user", um.getContent()));
                 } else {
-                    List<Object> content = new ArrayList<>();
-                    for (ToolResultBlock trb : um.getToolResults()) {
+                    var content = new ArrayList<Object>();
+                    for (var trb : um.getToolResults()) {
                         content.add(createToolResultBlock(trb.getToolUseId(), trb.getContent(), trb.isError()));
                     }
                     result.add(createApiMessage("user", content));
                 }
-            } else if (msg instanceof AssistantMessage) {
-                AssistantMessage am = (AssistantMessage) msg;
-                List<Object> content = new ArrayList<>();
+            } else if (msg instanceof AssistantMessage am) {
+                var content = new ArrayList<Object>();
                 if (am.getContent() != null && !am.getContent().isEmpty()) {
                     content.add(createTextBlock(am.getContent()));
                 }
-                for (ToolUseBlock tub : am.getToolUseBlocks()) {
+                for (var tub : am.getToolUseBlocks()) {
                     content.add(createToolUseBlock(tub.getId(), tub.getToolName(), tub.getInputJson()));
                 }
                 result.add(createApiMessage("assistant", content));
@@ -362,21 +321,21 @@ public class QueryEngine {
     }
 
     private Map<String, Object> createApiMessage(String role, Object content) {
-        Map<String, Object> msg = new LinkedHashMap<>();
+        var msg = new LinkedHashMap<String, Object>();
         msg.put("role", role);
         msg.put("content", content);
         return msg;
     }
 
     private Map<String, Object> createTextBlock(String text) {
-        Map<String, Object> block = new LinkedHashMap<>();
+        var block = new LinkedHashMap<String, Object>();
         block.put("type", "text");
         block.put("text", text);
         return block;
     }
 
     private Map<String, Object> createToolUseBlock(String id, String name, String input) {
-        Map<String, Object> block = new LinkedHashMap<>();
+        var block = new LinkedHashMap<String, Object>();
         block.put("type", "tool_use");
         block.put("id", id);
         block.put("name", name);
@@ -389,7 +348,7 @@ public class QueryEngine {
     }
 
     private Map<String, Object> createToolResultBlock(String toolUseId, String content, boolean isError) {
-        Map<String, Object> block = new LinkedHashMap<>();
+        var block = new LinkedHashMap<String, Object>();
         block.put("type", "tool_result");
         block.put("tool_use_id", toolUseId);
         block.put("content", content);
@@ -397,16 +356,16 @@ public class QueryEngine {
         return block;
     }
 
+    @SuppressWarnings("unchecked")
     private Map<String, Object> getMap(Map<String, Object> data, String key) {
         Object val = data.get(key);
         return (val instanceof Map) ? (Map<String, Object>) val : null;
     }
 
     private List<Map<String, Object>> buildApiTools() {
-        List<Map<String, Object>> result = new ArrayList<>();
-        List<Tool> tools = toolRegistry.getEnabledTools();
-        for (Tool tool : tools) {
-            Map<String, Object> toolDef = new LinkedHashMap<>();
+        var result = new ArrayList<Map<String, Object>>();
+        for (var tool : toolRegistry.getEnabledTools()) {
+            var toolDef = new LinkedHashMap<String, Object>();
             toolDef.put("name", tool.getName());
             toolDef.put("description", tool.getDescription());
             try {
@@ -420,10 +379,10 @@ public class QueryEngine {
     }
 
     private Map<String, Object> createToolResult(String toolUseId, String content, boolean isError) {
-        Map<String, Object> msg = new LinkedHashMap<>();
+        var msg = new LinkedHashMap<String, Object>();
         msg.put("role", "user");
-        List<Map<String, Object>> blocks = new ArrayList<>();
-        Map<String, Object> block = new LinkedHashMap<>();
+        var blocks = new ArrayList<Map<String, Object>>();
+        var block = new LinkedHashMap<String, Object>();
         block.put("type", "tool_result");
         block.put("tool_use_id", toolUseId);
         block.put("content", content);
@@ -433,27 +392,22 @@ public class QueryEngine {
         return msg;
     }
 
-    /**
-     * Create a new session, clearing current messages.
-     */
-    public Session newSession() {
-        currentSession = sessionManager.createSession("New Session");
+    // ---- Session management ----
+
+    public SessionEntity newSession() {
+        currentSession = sessionService.createSession("New Session");
         appStore.getState().clearMessages();
         return currentSession;
     }
 
-    /**
-     * Load an existing session by ID, populating messages.
-     */
-    public Session loadSession(String id) {
-        Session session = sessionManager.loadSession(id);
+    public SessionEntity loadSession(String id) {
+        var session = sessionService.loadSession(id);
         if (session == null) return null;
         currentSession = session;
 
-        // Populate app messages from session
-        AppState state = appStore.getState();
+        var state = appStore.getState();
         state.clearMessages();
-        for (SessionMessage sm : session.getMessages()) {
+        for (var sm : session.getMessages()) {
             if ("user".equals(sm.getRole())) {
                 state.addMessage(new UserMessage(sm.getContent()));
             } else if ("assistant".equals(sm.getRole())) {
@@ -463,79 +417,37 @@ public class QueryEngine {
         return session;
     }
 
-    /**
-     * Get current session ID, or null if no session is active.
-     */
     public String getCurrentSessionId() {
-        return currentSession != null ? currentSession.getId() : null;
+        return currentSession != null ? currentSession.getSessionId() : null;
     }
 
-    /**
-     * Get current session, or null.
-     */
-    public Session getCurrentSession() {
-        return currentSession;
-    }
+    public SessionEntity getCurrentSession() { return currentSession; }
 
-    /**
-     * List all sessions as summary (metadata only).
-     */
     public List<Map<String, Object>> listSessions() {
-        List<Session> sessions = sessionManager.listSessionsSummary();
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Session s : sessions) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", s.getId());
-            m.put("title", s.getTitle());
-            m.put("createdAt", s.getCreatedAt());
-            m.put("updatedAt", s.getUpdatedAt());
-            result.add(m);
-        }
-        return result;
+        return sessionService.listSessionsSummary();
     }
 
-    /**
-     * Delete a session by ID.
-     */
     public boolean deleteSession(String id) {
-        sessionManager.deleteSession(id);
-        if (currentSession != null && currentSession.getId().equals(id)) {
+        sessionService.deleteSession(id);
+        if (currentSession != null && currentSession.getSessionId().equals(id)) {
             currentSession = null;
             appStore.getState().clearMessages();
         }
         return true;
     }
 
-    /**
-     * Rename a session.
-     */
     public boolean renameSession(String id, String title) {
-        Session session = sessionManager.loadSession(id);
+        var session = sessionService.loadSession(id);
         if (session == null) return false;
-        session.setTitle(title);
-        sessionManager.saveSession(session);
-        if (currentSession != null && currentSession.getId().equals(id)) {
+        sessionService.renameSession(id, title);
+        if (currentSession != null && currentSession.getSessionId().equals(id)) {
             currentSession.setTitle(title);
         }
         return true;
     }
 
-    private void saveCurrentSession() {
-        if (currentSession != null) {
-            try {
-                sessionManager.saveSession(currentSession);
-            } catch (Exception e) {
-                System.err.println("[QueryEngine] Failed to save session: " + e.getMessage());
-            }
-        }
-    }
+    public void abort() { aborted = true; }
 
-    public void abort() {
-        aborted = true;
-        if (mcpManager != null) {
-            mcpManager.shutdown();
-        }
-    }
     public Store<AppState> getAppStore() { return appStore; }
     public ToolRegistry getToolRegistry() { return toolRegistry; }
     public PermissionChecker getPermissionChecker() { return permissionChecker; }

@@ -4,6 +4,8 @@ target/
 *.log
 .idea/
 *.iml
-/web/
 .DS_Store
+data/
+sessions/
 config.yaml
+write_agents_md.py

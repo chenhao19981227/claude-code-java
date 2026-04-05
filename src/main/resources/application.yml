@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: claude-code-java
+  datasource:
+    url: jdbc:sqlite:${user.dir}/data/claude-code.db
+    driver-class-name: org.sqlite.JDBC
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    show-sql: false
+    open-in-view: false
+  jackson:
+    default-property-inclusion: non_null
+
+claude:
+  provider: glm
+  api-key: 10e4a166382e4de69728e892aecc7861.bRIbRocQR2nf3Uii
+  main-model: glm-5-turbo
+  small-model: glm-5
+  max-tokens: 65535
+  temperature: 0.7
+  base-url:
+  skill-directories:
+    - skills/
+  mcp-servers:
+    - name: mysql
+      command: python
+      args:
+        - "mcp-servers/mysql/mcp_mysql_server.py"
+      env:
+        DB_HOST: localhost
+        DB_PORT: "3306"
+        DB_USER: root
+        DB_PASSWORD: "123456"
+        DB_NAME: "mysql"
+  web-dir: web/

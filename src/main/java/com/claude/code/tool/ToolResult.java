@@ -20,7 +20,7 @@ public class ToolResult {
 
     public String getDataAsJson() {
         if (data == null) return "null";
-        if (data instanceof String) return (String) data;
+        if (data instanceof String s) return s;
         return data.toString();
     }
 

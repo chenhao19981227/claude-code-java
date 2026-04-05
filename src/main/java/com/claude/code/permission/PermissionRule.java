@@ -22,7 +22,6 @@ public class PermissionRule {
     public String getRuleContent() { return ruleContent; }
 
     public boolean matchesTool(String name) {
-        if (toolName == null || toolName.isEmpty()) return true;
-        return toolName.equals(name);
+        return toolName == null || toolName.isEmpty() || toolName.equals(name);
     }
 }

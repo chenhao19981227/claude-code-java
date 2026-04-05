@@ -1,6 +1,7 @@
 package com.claude.code.tool;
 
-import com.claude.code.util.JsonParse;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -9,15 +10,19 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+@Component
 public class BashTool extends Tool {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     public BashTool() {
         super("Bash", "Execute a shell command in the terminal. Use this for running git, npm, build tools, and other CLI commands.",
               "execute shell commands", 30000, false, false);
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public ToolResult call(String inputJson, ToolUseContext context) throws Exception {
-        Map<String, Object> input = JsonParse.simpleParse(inputJson);
+        Map<String, Object> input = MAPPER.readValue(inputJson, Map.class);
         String command = (String) input.get("command");
         Number timeoutNum = (Number) input.get("timeout");
         long timeoutMs = timeoutNum != null ? timeoutNum.longValue() : 120000;
@@ -37,27 +42,25 @@ public class BashTool extends Tool {
         pb.redirectErrorStream(false);
 
         Process process = pb.start();
-        StringBuilder stdout = new StringBuilder();
-        StringBuilder stderr = new StringBuilder();
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
 
-        Thread stdoutReader = new Thread(() -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        Thread stdoutReader = Thread.startVirtualThread(() -> {
+            try (var reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     stdout.append(line).append("\n");
                 }
             } catch (Exception ignored) {}
         });
-        Thread stderrReader = new Thread(() -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+        Thread stderrReader = Thread.startVirtualThread(() -> {
+            try (var reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     stderr.append(line).append("\n");
                 }
             } catch (Exception ignored) {}
         });
-        stdoutReader.start();
-        stderrReader.start();
 
         boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
         if (!finished) {
@@ -69,14 +72,14 @@ public class BashTool extends Tool {
         stderrReader.join(5000);
 
         int exitCode = process.exitValue();
-        Map<String, Object> data = new HashMap<>();
+        var data = new HashMap<String, Object>();
         data.put("stdout", stdout.toString());
         data.put("stderr", stderr.toString());
         data.put("exitCode", exitCode);
         data.put("interrupted", false);
 
         if (exitCode != 0) {
-            return ToolResult.error("Command failed with exit code " + exitCode + "\n" + stderr.toString());
+            return ToolResult.error("Command failed with exit code " + exitCode + "\n" + stderr);
         }
 
         return ToolResult.success(data);
@@ -84,8 +87,7 @@ public class BashTool extends Tool {
 
     @Override
     public String getInputSchemaJson() {
-        return "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The shell command to execute\"}," +
-               "\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in milliseconds (default 120000)\"}}," +
-                "\"required\":[\"command\"]}";
+        return """
+                {"type":"object","properties":{"command":{"type":"string","description":"The shell command to execute"},"timeout":{"type":"number","description":"Timeout in milliseconds (default 120000)"}},"required":["command"]}""";
     }
 }

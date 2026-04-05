@@ -1,5 +1,7 @@
 package com.claude.code.mcp;
 
+import org.springframework.stereotype.Component;
+
 import java.util.Map;
 
 public class McpServerConfig {
@@ -21,6 +23,5 @@ public class McpServerConfig {
     public String[] getArgs() { return args; }
     public String getTransport() { return transport; }
     public Map<String, String> getEnv() { return env; }
-
     public void setEnv(Map<String, String> env) { this.env = env; }
 }

@@ -12,7 +12,6 @@ public class AssistantMessage extends Message {
     private int outputTokens;
 
     public AssistantMessage() { super(Type.ASSISTANT); this.content = ""; }
-
     public AssistantMessage(String content) { super(Type.ASSISTANT); this.content = content; }
 
     public String getContent() { return content; }

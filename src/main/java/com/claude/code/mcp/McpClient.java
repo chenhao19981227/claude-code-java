@@ -34,22 +34,18 @@ public class McpClient {
         }
 
         try {
-            // Send initialize request
-            Map<String, Object> params = new LinkedHashMap<String, Object>();
-            Map<String, Object> capabilities = new HashMap<String, Object>();
-            Map<String, Object> clientInfo = new LinkedHashMap<String, Object>();
+            var params = new LinkedHashMap<String, Object>();
+            var capabilities = new HashMap<String, Object>();
+            var clientInfo = new LinkedHashMap<String, Object>();
             clientInfo.put("name", "claude-code-java");
-            clientInfo.put("version", "1.0.0");
+            clientInfo.put("version", "2.0.0");
 
             params.put("protocolVersion", "2024-11-05");
             params.put("capabilities", capabilities);
             params.put("clientInfo", clientInfo);
 
-            String initResponse = transport.sendRequest("initialize", params);
-
-            // Send initialized notification
+            transport.sendRequest("initialize", params);
             transport.sendNotification("notifications/initialized", null);
-
             connected = true;
         } catch (Exception e) {
             transport.close();
@@ -67,15 +63,12 @@ public class McpClient {
             String response = transport.sendRequest("tools/list", null);
             JsonNode root = MAPPER.readTree(response);
             JsonNode result = root.get("result");
-            if (result == null) {
-                return new ArrayList<McpTool>();
-            }
-            JsonNode toolsNode = result.get("tools");
-            if (toolsNode == null || !toolsNode.isArray()) {
-                return new ArrayList<McpTool>();
-            }
+            if (result == null) return new ArrayList<>();
 
-            List<McpTool> tools = new ArrayList<McpTool>();
+            JsonNode toolsNode = result.get("tools");
+            if (toolsNode == null || !toolsNode.isArray()) return new ArrayList<>();
+
+            var tools = new ArrayList<McpTool>();
             for (JsonNode toolNode : toolsNode) {
                 String name = toolNode.has("name") ? toolNode.get("name").asText() : "unknown";
                 String description = toolNode.has("description") ? toolNode.get("description").asText() : "";
@@ -96,32 +89,25 @@ public class McpClient {
             throw new IOException("MCP client not connected: " + config.getName());
         }
 
-        Map<String, Object> params = new LinkedHashMap<String, Object>();
+        var params = new LinkedHashMap<String, Object>();
         params.put("name", toolName);
-        if (arguments != null) {
-            params.put("arguments", arguments);
-        } else {
-            params.put("arguments", new HashMap<String, Object>());
-        }
+        params.put("arguments", arguments != null ? arguments : new HashMap<>());
 
         try {
             String response = transport.sendRequest("tools/call", params);
             JsonNode root = MAPPER.readTree(response);
             JsonNode result = root.get("result");
 
-            if (result == null) {
-                return new McpToolResult("", false);
-            }
+            if (result == null) return new McpToolResult("", false);
 
-            // Extract content array
             JsonNode contentNode = result.get("content");
             boolean isError = result.has("isError") && result.get("isError").asBoolean();
 
-            StringBuilder sb = new StringBuilder();
+            var sb = new StringBuilder();
             if (contentNode != null && contentNode.isArray()) {
                 for (JsonNode item : contentNode) {
                     if ("text".equals(item.has("type") ? item.get("type").asText() : "")) {
-                        if (sb.length() > 0) sb.append("\n");
+                        if (!sb.isEmpty()) sb.append("\n");
                         sb.append(item.has("text") ? item.get("text").asText() : "");
                     }
                 }
@@ -140,7 +126,5 @@ public class McpClient {
         connected = false;
     }
 
-    public boolean isConnected() {
-        return connected;
-    }
+    public boolean isConnected() { return connected; }
 }

@@ -1,51 +1,48 @@
 package com.claude.code.skill;
 
-import java.io.BufferedReader;
+import com.claude.code.config.AppProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
 import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
+@Component
 public class SkillLoader {
+    private static final Logger log = LoggerFactory.getLogger(SkillLoader.class);
+
     private final List<String> skillDirectories;
     private List<Skill> cachedSkills;
 
-    public SkillLoader(List<String> skillDirectories) {
-        this.skillDirectories = skillDirectories != null ? skillDirectories : new ArrayList<String>();
+    public SkillLoader(AppProperties appProperties) {
+        this.skillDirectories = appProperties.getSkillDirectories() != null
+                ? appProperties.getSkillDirectories()
+                : new ArrayList<>(List.of("skills/"));
     }
 
     public List<Skill> loadAllSkills() {
-        if (cachedSkills != null) {
-            return cachedSkills;
-        }
-        List<Skill> skills = new ArrayList<Skill>();
+        if (cachedSkills != null) return cachedSkills;
+
+        var skills = new ArrayList<Skill>();
+        var dirs = new ArrayList<>(skillDirectories);
 
         // Always include default skill directory
-        List<String> dirs = new ArrayList<String>(skillDirectories);
-        boolean hasDefault = false;
-        for (String dir : dirs) {
-            if ("skills".equals(dir) || ("." + File.separator + "skills").equals(dir)) {
-                hasDefault = true;
-                break;
-            }
-        }
-        if (!hasDefault) {
-            dirs.add("skills");
-        }
+        boolean hasDefault = dirs.stream().anyMatch(d -> "skills".equals(d) || ("." + File.separator + "skills").equals(d));
+        if (!hasDefault) dirs.add("skills");
 
-        for (String dirPath : dirs) {
-            File dir = new File(dirPath);
-            if (!dir.exists() || !dir.isDirectory()) {
-                continue;
+        for (var dirPath : dirs) {
+            var dir = new File(dirPath);
+            if (dir.exists() && dir.isDirectory()) {
+                loadSkillsFromDirectory(dir, skills);
             }
-            loadSkillsFromDirectory(dir, skills);
         }
 
         cachedSkills = skills;
+        log.info("Loaded {} skills from {} directories", skills.size(), dirs.size());
         return skills;
     }
 
@@ -53,75 +50,52 @@ public class SkillLoader {
         File[] children = dir.listFiles();
         if (children == null) return;
 
-        for (File child : children) {
+        for (var child : children) {
             if (child.isDirectory()) {
-                // Check for SKILL.md inside subdirectory
-                File skillFile = new File(child, "SKILL.md");
+                var skillFile = new File(child, "SKILL.md");
                 if (skillFile.exists() && skillFile.canRead()) {
-                    Skill skill = parseSkillFile(skillFile, child.getName());
-                    if (skill != null) {
-                        skills.add(skill);
-                    }
+                    parseSkillFile(skillFile, child.getName()).ifPresent(skills::add);
                 }
-                // Recurse into nested directories
                 loadSkillsFromDirectory(child, skills);
             } else if ("SKILL.md".equals(child.getName())) {
-                // SKILL.md in the root of a skill directory
-                Skill skill = parseSkillFile(child, dir.getName());
-                if (skill != null) {
-                    skills.add(skill);
-                }
+                parseSkillFile(child, dir.getName()).ifPresent(skills::add);
             }
         }
     }
 
-    private Skill parseSkillFile(File file, String defaultName) {
+    private java.util.Optional<Skill> parseSkillFile(File file, String defaultName) {
         try {
-            String content = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            String content = Files.readString(file.toPath());
             String description = extractDescription(content);
-            return new Skill(defaultName, description, content, file.getAbsolutePath());
-        } catch (IOException e) {
-            System.err.println("Warning: failed to read skill file " + file.getAbsolutePath() + ": " + e.getMessage());
-            return null;
+            return java.util.Optional.of(new Skill(defaultName, description, content, file.getAbsolutePath()));
+        } catch (Exception e) {
+            log.warn("Failed to read skill file {}: {}", file.getAbsolutePath(), e.getMessage());
+            return java.util.Optional.empty();
         }
     }
 
     private String extractDescription(String content) {
-        if (content == null || content.isEmpty()) {
-            return "";
-        }
-
+        if (content == null || content.isEmpty()) return "";
         String[] lines = content.split("\\r?\\n");
-        // Look for a # Description header first
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i].trim();
-            if (line.toLowerCase().startsWith("# description")) {
-                // Take the next non-empty line as the description
-                for (int j = i + 1; j < lines.length; j++) {
-                    String descLine = lines[j].trim();
-                    if (!descLine.isEmpty() && !descLine.startsWith("#")) {
-                        return descLine;
-                    }
+
+        for (var line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.toLowerCase().startsWith("# description")) {
+                for (var descLine : lines) {
+                    String dl = descLine.trim();
+                    if (!dl.isEmpty() && !dl.startsWith("#")) return dl.length() > 200 ? dl.substring(0, 200) + "..." : dl;
                 }
             }
         }
 
-        // Fall back to first non-empty, non-heading line
-        for (String line : lines) {
+        for (var line : lines) {
             String trimmed = line.trim();
             if (!trimmed.isEmpty() && !trimmed.startsWith("#")) {
-                // Truncate long lines
-                if (trimmed.length() > 200) {
-                    return trimmed.substring(0, 200) + "...";
-                }
-                return trimmed;
+                return trimmed.length() > 200 ? trimmed.substring(0, 200) + "..." : trimmed;
             }
         }
-
         return "";
     }
 
-    public void reload() {
-        cachedSkills = null;
-    }
+    public void reload() { cachedSkills = null; }
 }

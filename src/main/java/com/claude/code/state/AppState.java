@@ -1,5 +1,6 @@
 package com.claude.code.state;
 
+import com.claude.code.config.AppProperties;
 import com.claude.code.message.Message;
 import com.claude.code.permission.PermissionMode;
 
@@ -9,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 public class AppState {
-    private String mainLoopModel = "claude-sonnet-4-20250514";
+    private String mainLoopModel;
     private PermissionMode permissionMode = PermissionMode.DEFAULT;
     private boolean verbose;
     private boolean thinkingEnabled;
@@ -20,6 +21,11 @@ public class AppState {
     private String sessionStartTime = String.valueOf(System.currentTimeMillis());
     private int totalInputTokens;
     private int totalOutputTokens;
+
+    public AppState(AppProperties props) {
+        this.mainLoopModel = props.getEffectiveModel();
+        this.currentWorkingDirectory = System.getProperty("user.dir");
+    }
 
     public String getMainLoopModel() { return mainLoopModel; }
     public void setMainLoopModel(String mainLoopModel) { this.mainLoopModel = mainLoopModel; }
@@ -39,7 +45,7 @@ public class AppState {
     public int getMessageCount() { return messages.size(); }
 
     public String getCurrentWorkingDirectory() { return currentWorkingDirectory; }
-    public void setCurrentWorkingDirectory(String currentWorkingDirectory) { this.currentWorkingDirectory = currentWorkingDirectory; }
+    public void setCurrentWorkingDirectory(String cwd) { this.currentWorkingDirectory = cwd; }
 
     public Map<String, String> getSettings() { return settings; }
     public String getSetting(String key) { return settings.get(key); }

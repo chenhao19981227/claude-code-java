@@ -1,57 +1,65 @@
 package com.claude.code.mcp;
 
+import com.claude.code.config.AppProperties;
 import com.claude.code.tool.Tool;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
 
+@Component
 public class McpManager {
-    private final List<McpClient> clients = new ArrayList<McpClient>();
-    private final List<McpToolAdapter> adapters = new ArrayList<McpToolAdapter>();
+    private static final Logger log = LoggerFactory.getLogger(McpManager.class);
 
-    public void init(List<McpServerConfig> configs) {
-        if (configs == null || configs.isEmpty()) {
-            return;
-        }
+    private final AppProperties appProperties;
+    private final List<McpClient> clients = new ArrayList<>();
+    private final List<McpToolAdapter> adapters = new ArrayList<>();
 
-        for (McpServerConfig config : configs) {
+    public McpManager(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
+
+    @PostConstruct
+    public void init() {
+        var configs = appProperties.getMcpServerConfigs();
+        if (configs.isEmpty()) return;
+
+        for (var config : configs) {
             try {
-                McpClient client = new McpClient(config);
+                var client = new McpClient(config);
                 client.connect();
 
-                List<McpTool> tools = client.listTools();
-                System.out.println("MCP server '" + config.getName() + "' connected with " + tools.size() + " tools");
+                var tools = client.listTools();
+                log.info("MCP server '{}' connected with {} tools", config.getName(), tools.size());
 
-                for (McpTool tool : tools) {
-                    McpToolAdapter adapter = new McpToolAdapter(client, tool);
+                for (var tool : tools) {
+                    var adapter = new McpToolAdapter(client, tool);
                     adapters.add(adapter);
-                    System.out.println("  Registered MCP tool: " + adapter.getName());
+                    log.info("  Registered MCP tool: {}", adapter.getName());
                 }
-
                 clients.add(client);
             } catch (Exception e) {
-                System.err.println("Warning: Failed to connect to MCP server '" + config.getName() + "': " + e.getMessage());
+                log.warn("Failed to connect to MCP server '{}': {}", config.getName(), e.getMessage());
             }
         }
     }
 
     public List<Tool> getToolAdapters() {
-        List<Tool> result = new ArrayList<Tool>();
-        result.addAll(adapters);
-        return result;
+        return new ArrayList<>(adapters);
     }
 
     public List<McpToolAdapter> getMcpAdapters() {
-        return new ArrayList<McpToolAdapter>(adapters);
+        return new ArrayList<>(adapters);
     }
 
+    @PreDestroy
     public void shutdown() {
-        for (McpClient client : clients) {
-            try {
-                client.close();
-            } catch (Exception e) {
-                // ignore
-            }
+        for (var client : clients) {
+            try { client.close(); } catch (Exception ignored) {}
         }
         clients.clear();
         adapters.clear();

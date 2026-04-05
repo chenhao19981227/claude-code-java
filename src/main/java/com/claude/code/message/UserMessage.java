@@ -10,7 +10,6 @@ public class UserMessage extends Message {
     private List<ToolResultBlock> toolResults;
 
     public UserMessage() { super(Type.USER); this.content = ""; }
-
     public UserMessage(String content) { super(Type.USER); this.content = content; }
 
     public String getContent() { return content; }
@@ -26,7 +25,7 @@ public class UserMessage extends Message {
     public void addToolResult(ToolResultBlock result) { getToolResults().add(result); }
 
     public static UserMessage withToolResults(List<ToolResultBlock> results) {
-        UserMessage msg = new UserMessage();
+        var msg = new UserMessage();
         msg.toolResults = results;
         return msg;
     }

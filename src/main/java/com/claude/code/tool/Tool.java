@@ -46,9 +46,6 @@ public abstract class Tool {
     public boolean isReadOnly() { return readOnly; }
     public boolean isConcurrencySafe() { return concurrencySafe; }
 
-    public String getInputSchemaJson() {
-        return "{}";
-    }
-
+    public String getInputSchemaJson() { return "{}"; }
     public String getUserFacingName() { return name; }
 }

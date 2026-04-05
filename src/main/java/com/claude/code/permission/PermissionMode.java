@@ -24,7 +24,7 @@ public enum PermissionMode {
 
     public static PermissionMode fromString(String value) {
         if (value == null) return DEFAULT;
-        for (PermissionMode mode : values()) {
+        for (var mode : values()) {
             if (mode.value.equalsIgnoreCase(value)) return mode;
         }
         return DEFAULT;
