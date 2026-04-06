@@ -23,6 +23,15 @@ public class SessionMessageEntity {
     @Column(columnDefinition = "TEXT")
     private String reasoning;
 
+    @Column(columnDefinition = "TEXT")
+    private String messagePayload;
+
+    @Column(columnDefinition = "integer default 0")
+    private int inputTokens;
+
+    @Column(columnDefinition = "integer default 0")
+    private int outputTokens;
+
     private long timestamp;
 
     public SessionMessageEntity() {}
@@ -47,6 +56,15 @@ public class SessionMessageEntity {
 
     public String getReasoning() { return reasoning; }
     public void setReasoning(String reasoning) { this.reasoning = reasoning; }
+
+    public String getMessagePayload() { return messagePayload; }
+    public void setMessagePayload(String messagePayload) { this.messagePayload = messagePayload; }
+
+    public int getInputTokens() { return inputTokens; }
+    public void setInputTokens(int inputTokens) { this.inputTokens = inputTokens; }
+
+    public int getOutputTokens() { return outputTokens; }
+    public void setOutputTokens(int outputTokens) { this.outputTokens = outputTokens; }
 
     public long getTimestamp() { return timestamp; }
     public void setTimestamp(long timestamp) { this.timestamp = timestamp; }

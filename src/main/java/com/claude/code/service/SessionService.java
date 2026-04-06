@@ -32,6 +32,16 @@ public class SessionService {
     }
 
     @Transactional(readOnly = true)
+    public SessionEntity loadSessionWithMessages(String sessionId) {
+        var session = sessionRepository.findBySessionId(sessionId).orElse(null);
+        if (session != null) {
+            // Force-initialize lazy-loaded messages while transaction is open
+            session.getMessages().size();
+        }
+        return session;
+    }
+
+    @Transactional(readOnly = true)
     public List<SessionEntity> listSessions() {
         return sessionRepository.findAllByOrderByUpdatedAtDesc();
     }
@@ -71,6 +81,20 @@ public class SessionService {
         if (session == null) return;
         var msg = new SessionMessageEntity(role, content);
         msg.setReasoning(reasoning);
+        session.addMessage(msg);
+        sessionRepository.save(session);
+    }
+
+    @Transactional
+    public void addFullMessage(String sessionId, String role, String content, String reasoning,
+                                String messagePayload, int inputTokens, int outputTokens) {
+        var session = sessionRepository.findBySessionId(sessionId).orElse(null);
+        if (session == null) return;
+        var msg = new SessionMessageEntity(role, content);
+        msg.setReasoning(reasoning);
+        msg.setMessagePayload(messagePayload);
+        msg.setInputTokens(inputTokens);
+        msg.setOutputTokens(outputTokens);
         session.addMessage(msg);
         sessionRepository.save(session);
     }
