@@ -1,6 +1,7 @@
 package com.claude.code.query;
 
 import com.claude.code.api.*;
+import com.claude.code.compaction.ContextCompactor;
 import com.claude.code.config.AppProperties;
 import com.claude.code.context.SystemPromptBuilder;
 import com.claude.code.hook.HookResult;
@@ -47,6 +48,7 @@ public class QueryEngine {
     private final McpManager mcpManager;
     private final SkillMatcher skillMatcher;
     private final HookRunner hookRunner;
+    private final ContextCompactor contextCompactor;
     private final String workingDir;
     private final List<Tool> injectedTools;
 
@@ -71,7 +73,7 @@ public class QueryEngine {
     public QueryEngine(ApiClient client, ToolRegistry toolRegistry,
                        SessionService sessionService, AppProperties appProperties,
                        SkillLoader skillLoader, McpManager mcpManager,
-                       HookRunner hookRunner,
+                       HookRunner hookRunner, ContextCompactor contextCompactor,
                        List<Tool> tools) {
         this.client = client;
         this.toolRegistry = toolRegistry;
@@ -80,6 +82,7 @@ public class QueryEngine {
         this.skillLoader = skillLoader;
         this.mcpManager = mcpManager;
         this.hookRunner = hookRunner;
+        this.contextCompactor = contextCompactor;
         this.injectedTools = tools != null ? tools : List.of();
         this.workingDir = System.getProperty("user.dir");
         this.permissionChecker = new PermissionChecker(workingDir);
@@ -164,8 +167,22 @@ public class QueryEngine {
         state.addMessage(userMsg);
         sessionService.addMessage(currentSession.getSessionId(), "user", userInput);
 
+        // Reset compacted flag for each new user message
+        state.setCompacted(false);
+
         // Check for slash command — direct skill invocation (Claude Code style)
         List<Skill> activeSkills = null;
+
+        // /compact command — force context compaction
+        if ("/compact".equalsIgnoreCase(userInput.trim())) {
+            log.info("Manual /compact command triggered");
+            String sessionId = currentSession != null ? currentSession.getSessionId() : null;
+            String result = contextCompactor.forceCompact(state, sessionId);
+            callback.onTextDelta("Context compaction: " + result + "\n");
+            callback.onComplete();
+            return;
+        }
+
         Optional<Skill> slashMatch = skillMatcher.matchSlashCommand(userInput, skillMap);
         if (slashMatch.isPresent()) {
             Skill matched = slashMatch.get();
@@ -269,6 +286,15 @@ public class QueryEngine {
                 callback.onReasoningDelta(text);
             }
 
+            @Override public void onTokenUsage(TokenUsage usage) {
+                AppState state = appStore.getState();
+                state.setLastInputTokens(usage.inputTokens());
+                state.addInputTokens(usage.inputTokens());
+                state.addOutputTokens(usage.outputTokens());
+                log.debug("Token usage: input={}, output={}, total_input={}",
+                        usage.inputTokens(), usage.outputTokens(), state.getTotalInputTokens());
+            }
+
             @Override public void onError(Throwable error) {
                 callback.onError(error.getMessage());
             }
@@ -348,7 +374,7 @@ public class QueryEngine {
             if (permissionChecker.isAllowedAll(toolName)) {
                 try {
                     ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
-                    String resultJson = result.getDataAsJson();
+                    String resultJson = truncateToolOutput(result.getDataAsJson());
                     callback.onToolResult(toolUseId, resultJson, result.isError());
                     pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
                     toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
@@ -395,7 +421,7 @@ public class QueryEngine {
                     switch (action) {
                         case "allow_once" -> {
                             ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
-                            String resultJson = result.getDataAsJson();
+                            String resultJson = truncateToolOutput(result.getDataAsJson());
                             callback.onToolResult(toolUseId, resultJson, result.isError());
                             pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
                             toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
@@ -403,7 +429,7 @@ public class QueryEngine {
                         case "allow_all" -> {
                             permissionChecker.allowAllForTool(toolName);
                             ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
-                            String resultJson = result.getDataAsJson();
+                            String resultJson = truncateToolOutput(result.getDataAsJson());
                             callback.onToolResult(toolUseId, resultJson, result.isError());
                             pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
                             toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
@@ -434,7 +460,7 @@ public class QueryEngine {
             // Allowed - execute tool
             try {
                 ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
-                String resultJson = result.getDataAsJson();
+                String resultJson = truncateToolOutput(result.getDataAsJson());
                 callback.onToolResult(toolUseId, resultJson, result.isError());
                 pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
                 toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
@@ -471,6 +497,19 @@ public class QueryEngine {
             systemPrompt.add(SystemPromptBuilder.getActiveSkillSection(List.of(modelInvokedSkill)));
         }
 
+        // Check if context compaction is needed before next API call
+        String sessionId = currentSession != null ? currentSession.getSessionId() : null;
+        if (contextCompactor.shouldCompact(state)) {
+            log.info("Auto-compacting context: last input tokens {} exceeded threshold",
+                    state.getLastInputTokens());
+            String summary = contextCompactor.compact(state, sessionId);
+            if (summary != null) {
+                callback.onTextDelta("\n[Context auto-compacted: " +
+                        (state.getMessageCount() - appProperties.getCompactionKeepRecentMessages()) +
+                        " older messages summarized]\n");
+            }
+        }
+
         List<Map<String, Object>> newMessages = buildApiMessages(state.getMessages());
 
         var nextRequest = new StreamRequest.Builder()
@@ -484,6 +523,16 @@ public class QueryEngine {
             .build();
 
         executeQueryLoop(nextRequest, callback, turn + 1);
+    }
+
+    /**
+     * 截断过大的工具输出，防止上下文窗口被单个工具结果占满。
+     */
+    private String truncateToolOutput(String output) {
+        int maxLen = appProperties.getMaxToolOutputLength();
+        if (output == null || output.length() <= maxLen) return output;
+        return output.substring(0, maxLen) +
+                "\n\n[Output truncated: " + output.length() + " chars exceeded limit of " + maxLen + "]";
     }
 
     private String buildPermissionDescription(String toolName, String inputJson) {

@@ -24,6 +24,14 @@ claude:
   max-tokens: 65535
   temperature: 0.7
   base-url:
+  # 上下文窗口大小（token数），用于自动压缩判断
+  context-window-size: 128000
+  # 自动压缩触发阈值（0.25-0.95），当输入token占比超过此值时触发压缩
+  compaction-threshold: 0.80
+  # 工具输出最大长度（字符数），超出部分会被截断
+  max-tool-output-length: 32000
+  # 压缩时保留的最近消息数量
+  compaction-keep-recent-messages: 8
   skill-directories:
     - skills/
   mcp-servers:

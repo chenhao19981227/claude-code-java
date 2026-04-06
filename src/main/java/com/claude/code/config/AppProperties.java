@@ -20,6 +20,10 @@ public class AppProperties {
     private String smallModel = "glm-5";
     private int maxTokens = 65535;
     private double temperature = 0.7;
+    private int contextWindowSize = 128000;
+    private double compactionThreshold = 0.80;
+    private int maxToolOutputLength = 32000;
+    private int compactionKeepRecentMessages = 8;
     private List<String> skillDirectories = new ArrayList<>(List.of("skills/"));
     private List<Map<String, Object>> mcpServers = new ArrayList<>();
     private String webDir = "web/";
@@ -44,6 +48,18 @@ public class AppProperties {
 
     public double getTemperature() { return temperature; }
     public void setTemperature(double temperature) { this.temperature = temperature; }
+
+    public int getContextWindowSize() { return contextWindowSize; }
+    public void setContextWindowSize(int contextWindowSize) { this.contextWindowSize = contextWindowSize; }
+
+    public double getCompactionThreshold() { return compactionThreshold; }
+    public void setCompactionThreshold(double compactionThreshold) { this.compactionThreshold = compactionThreshold; }
+
+    public int getMaxToolOutputLength() { return maxToolOutputLength; }
+    public void setMaxToolOutputLength(int maxToolOutputLength) { this.maxToolOutputLength = maxToolOutputLength; }
+
+    public int getCompactionKeepRecentMessages() { return compactionKeepRecentMessages; }
+    public void setCompactionKeepRecentMessages(int compactionKeepRecentMessages) { this.compactionKeepRecentMessages = compactionKeepRecentMessages; }
 
     public List<String> getSkillDirectories() { return skillDirectories; }
     public void setSkillDirectories(List<String> skillDirectories) { this.skillDirectories = skillDirectories; }
