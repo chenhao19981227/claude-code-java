@@ -171,6 +171,12 @@ public class Repl implements QueryEngine.QueryCallback {
     }
 
     @Override
+    public void onPermissionRequest(String requestId, String toolName, String description, String inputPreview) {
+        println(ANSI_YELLOW + "⚠ Permission required: " + toolName + " - " + description + ANSI_RESET);
+        println(ANSI_GRAY + "  [In CLI mode, permissions are auto-approved]" + ANSI_RESET);
+    }
+
+    @Override
     public void onComplete() {
         System.out.println();
         System.out.flush();

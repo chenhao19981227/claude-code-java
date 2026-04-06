@@ -38,3 +38,21 @@ claude:
         DB_PASSWORD: "123456"
         DB_NAME: "mysql"
   web-dir: web/
+  # Hook configuration (Claude Code compatible)
+  # Hooks are shell commands that run before/after tool execution
+  # Exit code 0 = allow, exit code 2 = deny/block
+  hooks:
+    # PreToolUse: runs before a tool executes, can block the tool call
+    # Example: block dangerous bash commands
+    # PreToolUse:
+    #   - matcher: "Bash"
+    #     type: command
+    #     command: "echo '{\"exit\": 0}'"  # always allow
+    #     timeout: 30
+    # PostToolUse: runs after a tool executes successfully
+    # Example: auto-format after file edits
+    # PostToolUse:
+    #   - matcher: "Edit|Write"
+    #     type: command
+    #     command: "echo 'File modified'"
+    #     timeout: 30

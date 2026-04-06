@@ -5,6 +5,7 @@ target/
 .idea/
 *.iml
 .DS_Store
+web/
 data/
 sessions/
 config.yaml
