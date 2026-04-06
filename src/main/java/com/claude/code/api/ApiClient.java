@@ -9,5 +9,7 @@ public interface ApiClient {
 
     Map<String, Object> sendMessageSync(StreamRequest request) throws Exception;
 
+    void cancelPendingRequests();
+
     ApiProvider getProvider();
 }

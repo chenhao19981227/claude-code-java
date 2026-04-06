@@ -251,6 +251,7 @@ public class QueryEngine {
             }
 
             @Override public void onContentBlockDelta(Map<String, Object> data) {
+                if (aborted) return;
                 Map<String, Object> delta = getMap(data, "delta");
                 if (delta == null) return;
                 String type = String.valueOf(delta.get("type"));
@@ -283,6 +284,7 @@ public class QueryEngine {
             @Override public void onMessageStop(Map<String, Object> data) {}
 
             @Override public void onReasoningDelta(String text) {
+                if (aborted) return;
                 callback.onReasoningDelta(text);
             }
 
@@ -817,7 +819,10 @@ public class QueryEngine {
         return true;
     }
 
-    public void abort() { aborted = true; }
+    public void abort() {
+        aborted = true;
+        client.cancelPendingRequests();
+    }
 
     public Store<AppState> getAppStore() { return appStore; }
     public ToolRegistry getToolRegistry() { return toolRegistry; }

@@ -20,6 +20,7 @@ public class AnthropicClient implements ApiClient {
     private final String baseUrl;
     private final String defaultModel;
     private final RetryHandler retryHandler;
+    private volatile Call activeCall;
 
     public AnthropicClient(String apiKey, String defaultModel) {
         this(apiKey, defaultModel, null);
@@ -51,8 +52,10 @@ public class AnthropicClient implements ApiClient {
                 .post(RequestBody.create(body, JSON))
                 .build();
 
-            httpClient.newCall(httpRequest).enqueue(new Callback() {
-                @Override public void onFailure(Call call, IOException e) { listener.onError(e); }
+            Call call = httpClient.newCall(httpRequest);
+            activeCall = call;
+            call.enqueue(new Callback() {
+                @Override public void onFailure(Call call, IOException e) { activeCall = null; listener.onError(e); }
                 @Override public void onResponse(Call call, Response response) {
                     try (ResponseBody responseBody = response.body()) {
                         if (!response.isSuccessful()) {
@@ -65,6 +68,7 @@ public class AnthropicClient implements ApiClient {
                     } catch (Exception e) {
                         listener.onError(e);
                     } finally {
+                        activeCall = null;
                         listener.onComplete();
                     }
                 }
@@ -309,4 +313,13 @@ public class AnthropicClient implements ApiClient {
 
     @Override
     public ApiProvider getProvider() { return ApiProvider.ANTHROPIC; }
+
+    @Override
+    public void cancelPendingRequests() {
+        Call call = activeCall;
+        if (call != null && !call.isCanceled()) {
+            call.cancel();
+            activeCall = null;
+        }
+    }
 }

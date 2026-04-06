@@ -21,6 +21,7 @@ public class OpenAiCompatibleClient implements ApiClient {
     private final String defaultModel;
     private final ApiProvider provider;
     private final RetryHandler retryHandler;
+    private volatile Call activeCall; // current in-flight HTTP call for cancellation
 
     public OpenAiCompatibleClient(String apiKey, String defaultModel, ApiProvider provider) {
         this(apiKey, defaultModel, provider, null);
@@ -60,8 +61,11 @@ public class OpenAiCompatibleClient implements ApiClient {
                 .post(RequestBody.create(body, JSON))
                 .build();
 
-            httpClient.newCall(httpRequest).enqueue(new Callback() {
+            Call call = httpClient.newCall(httpRequest);
+            activeCall = call;
+            call.enqueue(new Callback() {
                 @Override public void onFailure(Call call, IOException e) {
+                    activeCall = null;
                     listener.onError(e);
                     listener.onComplete();
                 }
@@ -76,6 +80,7 @@ public class OpenAiCompatibleClient implements ApiClient {
                     } catch (Exception e) {
                         listener.onError(e);
                     } finally {
+                        activeCall = null;
                         listener.onComplete();
                     }
                 }
@@ -108,6 +113,15 @@ public class OpenAiCompatibleClient implements ApiClient {
 
     @Override
     public ApiProvider getProvider() { return provider; }
+
+    @Override
+    public void cancelPendingRequests() {
+        Call call = activeCall;
+        if (call != null && !call.isCanceled()) {
+            call.cancel();
+            activeCall = null;
+        }
+    }
 
     public String getBaseUrl() { return baseUrl; }
 
