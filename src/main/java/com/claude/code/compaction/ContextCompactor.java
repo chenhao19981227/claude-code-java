@@ -2,8 +2,6 @@ package com.claude.code.compaction;
 
 import com.claude.code.api.ApiClient;
 import com.claude.code.api.StreamRequest;
-import com.claude.code.api.StreamListener;
-import com.claude.code.api.TokenUsage;
 import com.claude.code.config.AppProperties;
 import com.claude.code.message.AssistantMessage;
 import com.claude.code.message.Message;
@@ -199,8 +197,9 @@ public class ContextCompactor {
 
     /**
      * 调用 API 生成对话摘要。
-     * 使用 Claude Code 风格的摘要 prompt。
+     * 使用同步请求（非流式），因为摘要生成不需要流式输出。
      */
+    @SuppressWarnings("unchecked")
     private String generateSummary(String conversationText) {
         var systemPrompt = List.of(
                 "You are a helpful AI assistant tasked with summarizing conversations.",
@@ -217,57 +216,50 @@ public class ContextCompactor {
                 "Be concise but comprehensive. Focus on information that would be needed to continue the work."
         );
 
-        var userContent = "Please summarize the following conversation:\n\n" + conversationText;
-
-        var messages = List.<Map<String, Object>>of(Map.of("role", "user", "content", (Object) userContent));
-
         var request = new StreamRequest.Builder()
                 .model(appProperties.getEffectiveModel())
                 .systemPrompt(systemPrompt)
-                .messages(messages)
+                .messages(List.<Map<String, Object>>of(
+                        Map.of("role", "user", "content", (Object) ("Please summarize the following conversation:\n\n" + conversationText))
+                ))
                 .stream(false)
                 .temperature(0.3)
                 .maxTokens(4096)
                 .build();
 
-        var summaryBuffer = new StringBuilder();
-
         try {
-            client.streamMessage(request, new StreamListener() {
-                @Override public void onMessageStart(Map<String, Object> data) {}
-                @Override public void onContentBlockStart(Map<String, Object> data) {}
-                @Override public void onContentBlockDelta(Map<String, Object> data) {
-                    Map<String, Object> delta = (Map<String, Object>) data.get("delta");
-                    if (delta != null && "text_delta".equals(delta.get("type"))) {
-                        summaryBuffer.append(delta.get("text"));
+            Map<String, Object> response = client.sendMessageSync(request);
+            // Extract content from OpenAI-compatible response
+            if (response != null && response.containsKey("choices")) {
+                var choices = (List<Map<String, Object>>) response.get("choices");
+                if (choices != null && !choices.isEmpty()) {
+                    var message = (Map<String, Object>) choices.get(0).get("message");
+                    if (message != null) {
+                        Object content = message.get("content");
+                        if (content instanceof String s && !s.isEmpty()) {
+                            return extractSummary(s);
+                        }
                     }
                 }
-                @Override public void onContentBlockStop(Map<String, Object> data) {}
-                @Override public void onMessageDelta(Map<String, Object> data) {}
-                @Override public void onMessageStop(Map<String, Object> data) {}
-                @Override public void onReasoningDelta(String text) {}
-                @Override public void onTokenUsage(TokenUsage usage) {}
-                @Override public void onError(Throwable error) {
-                    log.error("Error generating summary: {}", error.getMessage());
-                }
-                @Override public void onComplete() {}
-            });
+            }
+            log.warn("Failed to extract summary from API response");
+            return null;
         } catch (Exception e) {
             log.error("Failed to call API for summary generation: {}", e.getMessage());
             return null;
         }
+    }
 
-        String result = summaryBuffer.toString().trim();
+    private String extractSummary(String result) {
         // Extract just the <summary> content if present
         if (result.contains("<summary>")) {
             int start = result.indexOf("<summary>") + "<summary>".length();
             int end = result.indexOf("</summary>");
             if (end > start) {
-                result = result.substring(start, end).trim();
+                return result.substring(start, end).trim();
             }
         }
-
-        return result;
+        return result.trim();
     }
 
     private static String escapeJson(String s) {

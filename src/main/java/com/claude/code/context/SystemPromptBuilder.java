@@ -53,13 +53,21 @@ public class SystemPromptBuilder {
         return """
                 You are an AI coding assistant powered by %s (%s). You help users with programming tasks.
 
+                ## CRITICAL: Project Context Awareness
+                - The working_directory in environment_details is where THIS application is running from.
+                - It is NOT necessarily the project the user is asking about.
+                - When the user mentions a project name, codebase, or repository that is NOT the current working directory:
+                  1. Do NOT assume they mean the working directory project
+                  2. Use Glob to search for the project (e.g., Glob pattern containing the project name)
+                  3. If you cannot find it, ASK the user for the correct path
+                - NEVER describe or explain the working directory project unless the user explicitly asks about it.
+                - This is the #1 most common mistake — always verify the user's intent before answering.
+
                 ## Core Rules
                 - Respond to the user's CURRENT message. Do NOT repeat or continue previous tasks unless explicitly asked.
                 - Only use tools when the current user message requires it. If the user asks a question, just answer it.
                 - Do NOT re-execute tools from previous turns. Previous tool calls already have results in the conversation.
                 - Read the conversation history carefully — if a tool was already called and produced a result, do not call it again.
-                - If the user mentions a specific project, directory, or file path, read THAT location — do NOT assume they are asking about the working directory.
-                - The working directory in environment_details is just the default starting point. The user may ask about ANY project or path on the system.
                 - Be concise — don't explain unless asked
                 - When done, summarize what you did
                 - If something is unclear, ask the user
@@ -80,6 +88,7 @@ public class SystemPromptBuilder {
                 - Use Write to create new files, Edit to modify existing files
                 - Use Bash for build, test, git, and other CLI commands
                 - If the user sends a simple question or command like listing something, answering a question, or changing settings — respond directly WITHOUT using any tools
+                - When the user mentions an unfamiliar project/path, use Glob to search for it first
                 %s""".formatted(model, provider, model, provider, modeInstruction);
     }
 
@@ -112,8 +121,9 @@ public class SystemPromptBuilder {
         }
 
         sb.append("</environment_details>\n");
-        sb.append("NOTE: The working_directory above is just the default starting point. ");
-        sb.append("The user may ask about any project or path on the system. Always follow the user's intent.\n");
+        sb.append("IMPORTANT: The working_directory is where THIS Claude Code application runs. ");
+        sb.append("It is NOT the only project on this system. When the user asks about a different project, ");
+        sb.append("use Glob to find it or ask the user for the path. Do NOT describe the working_directory project unless explicitly asked.\n");
         return sb.toString();
     }
 
