@@ -1,103 +1,84 @@
 package com.claude.code.skill;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
+/**
+ * Matches user input to skills using Claude Code's approach:
+ *
+ * 1. **Slash command direct trigger**: User types "/skillname" or "/skillname arg"
+ *    → Directly returns the matching skill.
+ *
+ * 2. **Model auto-invocation**: Claude sees skill descriptions in the system prompt
+ *    and can invoke a skill via the Skill tool when it determines one is relevant.
+ *    This is the Claude Code approach — the MODEL decides, not a keyword algorithm.
+ *
+ * Control (from frontmatter):
+ * - `disable-model-invocation: true` → skill NOT listed for model, user-only
+ * - `user-invocable: false` → skill NOT listed for user, model-only
+ * - Default → both can invoke, description always in system prompt
+ */
 public class SkillMatcher {
-    private static final int MAX_MATCHING_SKILLS = 3;
-    private static final double TRIGGER_PHRASE_BOOST = 3.0;
 
-    public List<Skill> findRelevantSkills(String userMessage, List<Skill> allSkills) {
-        if (userMessage == null || userMessage.trim().isEmpty() || allSkills == null || allSkills.isEmpty()) {
-            return Collections.emptyList();
+    /**
+     * Check if the user message is a slash command targeting a specific skill.
+     * Only matches skills where userInvocable is true.
+     */
+    public Optional<Skill> matchSlashCommand(String userMessage, Map<String, Skill> skillMap) {
+        if (userMessage == null || userMessage.trim().isEmpty()) return Optional.empty();
+        String trimmed = userMessage.trim();
+        if (!trimmed.startsWith("/")) return Optional.empty();
+
+        String[] parts = trimmed.substring(1).split("\\s+", 2);
+        String commandName = parts[0].toLowerCase();
+
+        Skill skill = skillMap.get(commandName);
+        if (skill != null && skill.isUserInvocable()) {
+            return Optional.of(skill);
         }
+        return Optional.empty();
+    }
 
-        Set<String> messageTokens = tokenize(userMessage.toLowerCase());
-        var scored = new ArrayList<ScoredSkill>();
+    /**
+     * Build the skill listing for the system prompt.
+     * Only includes skills where `disable-model-invocation` is NOT true.
+     * Claude sees these descriptions and can auto-invoke via the Skill tool.
+     */
+    public String buildCommandList(Map<String, Skill> skillMap) {
+        if (skillMap == null || skillMap.isEmpty()) return "";
 
-        for (var skill : allSkills) {
-            double score = computeScore(skill, messageTokens, userMessage);
-            if (score > 0) {
-                scored.add(new ScoredSkill(skill, score));
+        var visibleSkills = skillMap.values().stream()
+                .filter(Skill::isVisibleToModel)
+                .sorted(Comparator.comparing(Skill::getName))
+                .toList();
+
+        if (visibleSkills.isEmpty()) return "";
+
+        var sb = new StringBuilder();
+        sb.append("## Available Skills\n\n");
+        sb.append("You can invoke a skill by calling the `Skill` tool with the skill name. ");
+        sb.append("The user can also type `/skill-name` directly.\n\n");
+
+        for (var skill : visibleSkills) {
+            sb.append("- **").append(skill.getName()).append("**");
+            if (skill.getDescription() != null && !skill.getDescription().isEmpty()) {
+                sb.append(": ").append(skill.getDescription());
             }
+            sb.append("\n");
         }
 
-        scored.sort(Comparator.reverseOrder());
-        return scored.stream()
-                .limit(MAX_MATCHING_SKILLS)
-                .map(s -> s.skill)
-                .collect(Collectors.toList());
+        return sb.toString();
     }
 
-    private double computeScore(Skill skill, Set<String> messageTokens, String userMessage) {
-        double score = 0.0;
-
-        for (var kw : tokenize(skill.name().toLowerCase())) {
-            if (messageTokens.contains(kw)) score += 2.0;
-        }
-
-        for (var kw : tokenize(skill.description().toLowerCase())) {
-            if (messageTokens.contains(kw)) score += 1.0;
-        }
-
-        for (var phrase : extractTriggerPhrases(skill.content())) {
-            if (userMessage.toLowerCase().contains(phrase.toLowerCase())) {
-                score += TRIGGER_PHRASE_BOOST;
-            }
-        }
-
-        return score;
-    }
-
-    private List<String> extractTriggerPhrases(String content) {
-        var phrases = new ArrayList<String>();
-        if (content == null) return phrases;
-
-        String[] lines = content.split("\\r?\\n");
-        boolean inTriggerSection = false;
-
-        for (var line : lines) {
-            String trimmed = line.trim().toLowerCase();
-
-            if (trimmed.startsWith("trigger phrases:") || trimmed.startsWith("trigger phrases：")
-                    || trimmed.startsWith("触发词:") || trimmed.startsWith("触发词：")) {
-                inTriggerSection = true;
-                addPhrases(line.substring(line.indexOf(':') + 1).trim(), phrases);
-                continue;
-            }
-
-            if (inTriggerSection) {
-                if (trimmed.startsWith("#") || trimmed.isEmpty()) {
-                    inTriggerSection = false;
-                    continue;
-                }
-                if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-                    phrases.add(line.substring(2).trim());
-                } else {
-                    addPhrases(trimmed, phrases);
-                }
-            }
-        }
-        return phrases;
-    }
-
-    private void addPhrases(String text, List<String> phrases) {
-        if (text == null || text.isEmpty()) return;
-        for (var part : text.split("[,;|]")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) phrases.add(trimmed);
-        }
-    }
-
-    private Set<String> tokenize(String text) {
-        if (text == null || text.isEmpty()) return Set.of();
-        return Arrays.stream(text.split("[^a-z0-9]+"))
-                .filter(p -> p.length() >= 2)
-                .collect(Collectors.toSet());
-    }
-
-    private record ScoredSkill(Skill skill, double score) implements Comparable<ScoredSkill> {
-        @Override
-        public int compareTo(ScoredSkill other) { return Double.compare(other.score, this.score); }
+    /**
+     * Build the slash command listing for user-facing autocomplete/menu.
+     * Only includes skills where `user-invocable` is true.
+     */
+    public List<String> getUserCommandList(Map<String, Skill> skillMap) {
+        if (skillMap == null) return List.of();
+        return skillMap.values().stream()
+                .filter(Skill::isUserInvocable)
+                .map(s -> "/" + s.getName())
+                .sorted()
+                .toList();
     }
 }
