@@ -3,6 +3,8 @@ package com.claude.code.query;
 import com.claude.code.api.*;
 import com.claude.code.config.AppProperties;
 import com.claude.code.context.SystemPromptBuilder;
+import com.claude.code.hook.HookResult;
+import com.claude.code.hook.HookRunner;
 import com.claude.code.message.*;
 import com.claude.code.mcp.McpManager;
 import com.claude.code.model.entity.SessionEntity;
@@ -23,12 +25,17 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Service
 public class QueryEngine {
     private static final Logger log = LoggerFactory.getLogger(QueryEngine.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_TURNS = 50;
+    private static final long PERMISSION_TIMEOUT_MS = 120_000;
 
     private final ApiClient client;
     private final ToolRegistry toolRegistry;
@@ -39,30 +46,41 @@ public class QueryEngine {
     private final SkillLoader skillLoader;
     private final McpManager mcpManager;
     private final SkillMatcher skillMatcher;
+    private final HookRunner hookRunner;
     private final String workingDir;
+    private final List<Tool> injectedTools;
 
     private SessionEntity currentSession;
     private volatile boolean aborted;
-    private List<Skill> allSkills;
+    private Map<String, Skill> skillMap;
+    private String agentMode = "build";
+
+    // Pending permission requests: requestId -> future to complete with action
+    private final ConcurrentHashMap<String, CompletableFuture<String>> pendingPermissions = new ConcurrentHashMap<>();
 
     public interface QueryCallback {
         void onTextDelta(String text);
         void onReasoningDelta(String text);
         void onToolStart(String toolName, String toolUseId, String input);
         void onToolResult(String toolUseId, String result, boolean isError);
+        void onPermissionRequest(String requestId, String toolName, String description, String inputPreview);
         void onError(String error);
         void onComplete();
     }
 
     public QueryEngine(ApiClient client, ToolRegistry toolRegistry,
                        SessionService sessionService, AppProperties appProperties,
-                       SkillLoader skillLoader, McpManager mcpManager) {
+                       SkillLoader skillLoader, McpManager mcpManager,
+                       HookRunner hookRunner,
+                       List<Tool> tools) {
         this.client = client;
         this.toolRegistry = toolRegistry;
         this.sessionService = sessionService;
         this.appProperties = appProperties;
         this.skillLoader = skillLoader;
         this.mcpManager = mcpManager;
+        this.hookRunner = hookRunner;
+        this.injectedTools = tools != null ? tools : List.of();
         this.workingDir = System.getProperty("user.dir");
         this.permissionChecker = new PermissionChecker(workingDir);
         this.appStore = new Store<>(new AppState(appProperties));
@@ -72,19 +90,66 @@ public class QueryEngine {
 
     @PostConstruct
     public void init() {
-        // Register MCP tool adapters
-        for (var adapter : mcpManager.getToolAdapters()) {
-            toolRegistry.register(adapter);
+        // Register all injected Tool beans
+        for (var tool : injectedTools) {
+            toolRegistry.register(tool);
         }
-        // Load skills
-        allSkills = skillLoader.loadAllSkills();
+        // Load skills (indexed by name for fast slash-command lookup)
+        skillMap = skillLoader.loadAllSkills();
+        log.info("Initialized QueryEngine with {} core tools, {} skills: {}",
+                toolRegistry.getEnabledTools().size(), skillMap.size(),
+                skillMap.values().stream().map(Skill::getName).toList());
+
+        // Register MCP tools asynchronously — don't block startup
+        Thread.startVirtualThread(() -> {
+            boolean mcpReady = mcpManager.awaitInit(120_000);
+            if (mcpReady) {
+                var adapters = mcpManager.getToolAdapters();
+                for (var adapter : adapters) {
+                    toolRegistry.register(adapter);
+                }
+                log.info("MCP tools registered: {} total tools now: {}",
+                        adapters.size(), toolRegistry.getEnabledTools().size());
+            } else {
+                log.warn("MCP initialization timed out, proceeding without MCP tools");
+            }
+        });
     }
+
+    // ---- Mode management ----
+
+    public String getAgentMode() { return agentMode; }
+
+    public void setAgentMode(String mode) {
+        this.agentMode = mode;
+        this.permissionChecker.setAgentMode(mode);
+        if ("build".equals(mode)) {
+            // Reset "allow all" when switching modes
+            this.permissionChecker.resetAllowedAll();
+        }
+    }
+
+    // ---- Permission response (called from WebSocket handler) ----
+
+    public void respondPermission(String requestId, String action) {
+        CompletableFuture<String> future = pendingPermissions.remove(requestId);
+        if (future != null) {
+            if ("allow_all".equals(action)) {
+                // Find which tool this was for and mark it as allowed-all
+                // We store the tool name in the future's context - use a wrapper
+                future.complete(action);
+            } else {
+                future.complete(action);
+            }
+        }
+    }
+
+    // ---- Main message submission ----
 
     public void submitMessage(String userInput, final QueryCallback callback) {
         if (userInput == null || userInput.trim().isEmpty()) return;
         aborted = false;
 
-        // Auto-create session if none exists
         if (currentSession == null) {
             String title = userInput.length() > 50 ? userInput.substring(0, 50) : userInput;
             currentSession = sessionService.createSession(title);
@@ -97,22 +162,34 @@ public class QueryEngine {
         AppState state = appStore.getState();
         var userMsg = new UserMessage(userInput);
         state.addMessage(userMsg);
-
-        // Record in session via JPA
         sessionService.addMessage(currentSession.getSessionId(), "user", userInput);
 
-        // Build system prompt with relevant skills
-        List<Skill> relevantSkills = null;
-        if (allSkills != null && !allSkills.isEmpty()) {
-            relevantSkills = skillMatcher.findRelevantSkills(userInput, allSkills);
+        // Check for slash command — direct skill invocation (Claude Code style)
+        List<Skill> activeSkills = null;
+        Optional<Skill> slashMatch = skillMatcher.matchSlashCommand(userInput, skillMap);
+        if (slashMatch.isPresent()) {
+            Skill matched = slashMatch.get();
+            String arg = matched.extractArgument(userInput);
+            log.info("Slash command activated: /{} (arg: {})", matched.getName(), arg);
+            activeSkills = List.of(matched);
+            // If the command had an argument, use it as the actual user input for the model
+            if (!arg.isEmpty()) {
+                // Replace the user message with just the argument
+                state.getMessages().remove(state.getMessages().size() - 1);
+                var argMsg = new UserMessage(arg);
+                state.addMessage(argMsg);
+                sessionService.addMessage(currentSession.getSessionId(), "user", arg);
+                userInput = arg;
+            }
         }
-        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(workingDir, appProperties, relevantSkills);
 
-        // Build messages for API
+        List<String> systemPrompt = SystemPromptBuilder.buildSystemPrompt(
+                workingDir, appProperties, activeSkills, toolRegistry, agentMode, skillMatcher, skillMap);
+
         List<Map<String, Object>> apiMessages = buildApiMessages(state.getMessages());
-
-        // Build tools
         List<Map<String, Object>> apiTools = buildApiTools();
+        log.info("Submitting query with {} tools: {}", apiTools.size(),
+                apiTools.stream().map(t -> t.get("name")).toList());
 
         var request = new StreamRequest.Builder()
             .model(state.getMainLoopModel())
@@ -126,6 +203,8 @@ public class QueryEngine {
 
         executeQueryLoop(request, callback, 0);
     }
+
+    // ---- Query loop ----
 
     private void executeQueryLoop(StreamRequest request, final QueryCallback callback, int turn) {
         if (turn >= MAX_TURNS || aborted) {
@@ -184,7 +263,6 @@ public class QueryEngine {
             }
 
             @Override public void onMessageDelta(Map<String, Object> data) {}
-
             @Override public void onMessageStop(Map<String, Object> data) {}
 
             @Override public void onReasoningDelta(String text) {
@@ -208,7 +286,11 @@ public class QueryEngine {
                     state.addMessage(assistantMsg);
 
                     if (currentSession != null) {
-                        sessionService.addMessage(currentSession.getSessionId(), "assistant", textBuffer.toString());
+                        // Serialize full message structure including tool_use blocks
+                        String payload = serializeAssistantMessage(assistantMsg, null);
+                        sessionService.addFullMessage(
+                                currentSession.getSessionId(), "assistant", textBuffer.toString(),
+                                null, payload, 0, 0);
                     }
                 }
 
@@ -232,6 +314,9 @@ public class QueryEngine {
         toolContext.setAppStore(appStore);
         toolContext.setAllTools(toolRegistry.getEnabledTools());
 
+        // Collect tool results to store in state (critical for conversation continuity)
+        var toolResultBlocks = new ArrayList<ToolResultBlock>();
+
         for (var e : toolUseIds.entrySet()) {
             if (aborted) break;
             int index = e.getKey();
@@ -241,47 +326,156 @@ public class QueryEngine {
 
             Tool tool = toolRegistry.findByName(toolName);
             if (tool == null) {
-                callback.onToolResult(toolUseId, "Unknown tool: " + toolName, true);
-                pendingToolResults.add(createToolResult(toolUseId, "Unknown tool: " + toolName, true));
+                String err = "Unknown tool: " + toolName;
+                callback.onToolResult(toolUseId, err, true);
+                pendingToolResults.add(createToolResult(toolUseId, err, true));
+                toolResultBlocks.add(new ToolResultBlock(toolUseId, err, true));
+                continue;
+            }
+
+            // PreToolUse hook — can block tool execution
+            HookResult preHook = hookRunner.runHook("PreToolUse", toolName, inputJson, workingDir,
+                    currentSession != null ? currentSession.getSessionId() : null);
+            if (!preHook.isAllowed()) {
+                String err = "Blocked by hook: " + preHook.getReason();
+                callback.onToolResult(toolUseId, err, true);
+                pendingToolResults.add(createToolResult(toolUseId, err, true));
+                toolResultBlocks.add(new ToolResultBlock(toolUseId, err, true));
+                continue;
+            }
+
+            // Check if already allowed-all for this tool
+            if (permissionChecker.isAllowedAll(toolName)) {
+                try {
+                    ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
+                    String resultJson = result.getDataAsJson();
+                    callback.onToolResult(toolUseId, resultJson, result.isError());
+                    pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
+                    toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
+                } catch (Exception ex) {
+                    String errorMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                    callback.onToolResult(toolUseId, "Error: " + errorMsg, true);
+                    pendingToolResults.add(createToolResult(toolUseId, "Error: " + errorMsg, true));
+                    toolResultBlocks.add(new ToolResultBlock(toolUseId, "Error: " + errorMsg, true));
+                }
                 continue;
             }
 
             PermissionResult permResult = tool.checkPermissions(inputJson, toolContext);
+
             if (permResult.isDeny()) {
-                callback.onToolResult(toolUseId, "Denied: " + permResult.getMessage(), true);
-                pendingToolResults.add(createToolResult(toolUseId, "Denied: " + permResult.getMessage(), true));
+                String denied = "Denied: " + permResult.getMessage();
+                callback.onToolResult(toolUseId, denied, true);
+                pendingToolResults.add(createToolResult(toolUseId, denied, true));
+                toolResultBlocks.add(new ToolResultBlock(toolUseId, denied, true));
                 continue;
             }
 
+            // Auto-approve read-only tools
             if (permResult.isAsk() && tool.isReadOnly()) {
                 permResult = PermissionResult.allow();
             }
 
+            // Ask user for permission (async wait)
             if (permResult.isAsk()) {
-                callback.onToolResult(toolUseId, "Permission required: " + permResult.getMessage(), true);
-                pendingToolResults.add(createToolResult(toolUseId, "Permission required: " + permResult.getMessage(), true));
+                String requestId = UUID.randomUUID().toString();
+                CompletableFuture<String> future = new CompletableFuture<>();
+                pendingPermissions.put(requestId, future);
+
+                // Build a description of what the tool is about to do
+                String description = buildPermissionDescription(toolName, inputJson);
+                String inputPreview = inputJson.length() > 500 ? inputJson.substring(0, 500) + "..." : inputJson;
+
+                callback.onPermissionRequest(requestId, toolName, description, inputPreview);
+
+                try {
+                    String action = future.get(PERMISSION_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                    pendingPermissions.remove(requestId);
+
+                    switch (action) {
+                        case "allow_once" -> {
+                            ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
+                            String resultJson = result.getDataAsJson();
+                            callback.onToolResult(toolUseId, resultJson, result.isError());
+                            pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
+                            toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
+                        }
+                        case "allow_all" -> {
+                            permissionChecker.allowAllForTool(toolName);
+                            ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
+                            String resultJson = result.getDataAsJson();
+                            callback.onToolResult(toolUseId, resultJson, result.isError());
+                            pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
+                            toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
+                        }
+                        default -> {
+                            // denied
+                            callback.onToolResult(toolUseId, "Denied by user", true);
+                            pendingToolResults.add(createToolResult(toolUseId, "Denied by user", true));
+                            toolResultBlocks.add(new ToolResultBlock(toolUseId, "Denied by user", true));
+                        }
+                    }
+                } catch (TimeoutException te) {
+                    pendingPermissions.remove(requestId);
+                    String err = "Permission request timed out";
+                    callback.onToolResult(toolUseId, err, true);
+                    pendingToolResults.add(createToolResult(toolUseId, err, true));
+                    toolResultBlocks.add(new ToolResultBlock(toolUseId, err, true));
+                } catch (Exception ex) {
+                    pendingPermissions.remove(requestId);
+                    String errorMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                    callback.onToolResult(toolUseId, "Error: " + errorMsg, true);
+                    pendingToolResults.add(createToolResult(toolUseId, "Error: " + errorMsg, true));
+                    toolResultBlocks.add(new ToolResultBlock(toolUseId, "Error: " + errorMsg, true));
+                }
                 continue;
             }
 
+            // Allowed - execute tool
             try {
-                callback.onToolStart(toolName, toolUseId, inputJson);
-                ToolResult result = tool.call(inputJson, toolContext);
+                ToolResult result = executeToolWithHook(tool, inputJson, toolContext, toolUseId, currentSession != null ? currentSession.getSessionId() : null);
                 String resultJson = result.getDataAsJson();
                 callback.onToolResult(toolUseId, resultJson, result.isError());
                 pendingToolResults.add(createToolResult(toolUseId, resultJson, result.isError()));
+                toolResultBlocks.add(new ToolResultBlock(toolUseId, resultJson, result.isError()));
             } catch (Exception ex) {
                 String errorMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
                 callback.onToolResult(toolUseId, "Error: " + errorMsg, true);
                 pendingToolResults.add(createToolResult(toolUseId, "Error: " + errorMsg, true));
+                toolResultBlocks.add(new ToolResultBlock(toolUseId, "Error: " + errorMsg, true));
             }
         }
 
+        // CRITICAL: Store tool results in state so they appear in conversation history
+        // Without this, the model sees tool_use blocks with no corresponding tool_result,
+        // causing it to re-execute the same tools on the next user message
+        if (!toolResultBlocks.isEmpty()) {
+            var toolResultMsg = UserMessage.withToolResults(toolResultBlocks);
+            state.addMessage(toolResultMsg);
+            // Persist full tool_result message
+            if (currentSession != null) {
+                String payload = serializeToolResultMessage(toolResultBlocks);
+                sessionService.addFullMessage(
+                        currentSession.getSessionId(), "user", "", null, payload, 0, 0);
+            }
+        }
+
+        // Check if the model invoked a skill via the Skill tool
+        Skill modelInvokedSkill = SkillTool.consumeLoadedSkill();
+
+        // Build system prompt for next turn (may include the newly invoked skill)
+        List<String> systemPrompt = request.getSystemPrompt();
+        if (modelInvokedSkill != null) {
+            log.info("Injecting model-invoked skill into next turn: /{}", modelInvokedSkill.getName());
+            systemPrompt = new ArrayList<>(systemPrompt);
+            systemPrompt.add(SystemPromptBuilder.getActiveSkillSection(List.of(modelInvokedSkill)));
+        }
+
         List<Map<String, Object>> newMessages = buildApiMessages(state.getMessages());
-        newMessages.addAll(pendingToolResults);
 
         var nextRequest = new StreamRequest.Builder()
             .model(state.getMainLoopModel())
-            .systemPrompt(request.getSystemPrompt())
+            .systemPrompt(systemPrompt)
             .messages(newMessages)
             .tools(request.getTools())
             .stream(true)
@@ -291,6 +485,23 @@ public class QueryEngine {
 
         executeQueryLoop(nextRequest, callback, turn + 1);
     }
+
+    private String buildPermissionDescription(String toolName, String inputJson) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> input = MAPPER.readValue(inputJson, Map.class);
+            return switch (toolName) {
+                case "Write" -> "Create file: " + input.get("file_path");
+                case "Edit" -> "Edit file: " + input.get("file_path");
+                case "Bash" -> "Execute command: " + input.get("command");
+                default -> "Use tool: " + toolName;
+            };
+        } catch (Exception e) {
+            return "Use tool: " + toolName;
+        }
+    }
+
+    // ---- Message building ----
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> buildApiMessages(List<Message> messages) {
@@ -392,6 +603,121 @@ public class QueryEngine {
         return msg;
     }
 
+    // ---- Message serialization for persistence ----
+
+    private ToolResult executeToolWithHook(Tool tool, String inputJson, ToolUseContext context,
+                                           String toolUseId, String sessionId) {
+        try {
+            ToolResult result = tool.call(inputJson, context);
+            // PostToolUse hook (informational, doesn't block)
+            hookRunner.runHook("PostToolUse", tool.getName(), result.getDataAsJson(), workingDir, sessionId);
+            return result;
+        } catch (Exception ex) {
+            // PostToolUseFailure hook
+            String errorMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            hookRunner.runHook("PostToolUseFailure", tool.getName(), "Error: " + errorMsg, workingDir, sessionId);
+            throw new RuntimeException(ex);
+        }
+    }
+
+    private String serializeAssistantMessage(AssistantMessage msg, String reasoning) {
+        try {
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("messageType", "assistant");
+            payload.put("content", msg.getContent());
+            if (reasoning != null && !reasoning.isEmpty()) {
+                payload.put("reasoning", reasoning);
+            }
+            if (msg.hasToolUse()) {
+                var toolUses = new ArrayList<Map<String, Object>>();
+                for (var tub : msg.getToolUseBlocks()) {
+                    var tu = new LinkedHashMap<String, Object>();
+                    tu.put("id", tub.getId());
+                    tu.put("name", tub.getToolName());
+                    tu.put("input", tub.getInputJson());
+                    toolUses.add(tu);
+                }
+                payload.put("toolUseBlocks", toolUses);
+            }
+            return MAPPER.writeValueAsString(payload);
+        } catch (Exception e) {
+            log.warn("Failed to serialize assistant message: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String serializeToolResultMessage(List<ToolResultBlock> results) {
+        try {
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("messageType", "user_tool_results");
+            var resultList = new ArrayList<Map<String, Object>>();
+            for (var trb : results) {
+                var r = new LinkedHashMap<String, Object>();
+                r.put("toolUseId", trb.getToolUseId());
+                r.put("content", trb.getContent());
+                r.put("isError", trb.isError());
+                resultList.add(r);
+            }
+            payload.put("toolResultBlocks", resultList);
+            return MAPPER.writeValueAsString(payload);
+        } catch (Exception e) {
+            log.warn("Failed to serialize tool result message: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Message deserializeMessage(SessionMessageEntity sm) {
+        try {
+            if (sm.getMessagePayload() == null || sm.getMessagePayload().isEmpty()) {
+                // Backward compat: old messages without payload
+                return "user".equals(sm.getRole())
+                        ? new UserMessage(sm.getContent())
+                        : new AssistantMessage(sm.getContent());
+            }
+
+            var payload = MAPPER.readValue(sm.getMessagePayload(), Map.class);
+            String messageType = (String) payload.get("messageType");
+
+            if ("assistant".equals(messageType)) {
+                var msg = new AssistantMessage(sm.getContent());
+                var toolUses = (List<Map<String, Object>>) payload.get("toolUseBlocks");
+                if (toolUses != null) {
+                    for (var tu : toolUses) {
+                        String inputJson = tu.get("input") instanceof String
+                                ? (String) tu.get("input")
+                                : MAPPER.writeValueAsString(tu.get("input"));
+                        msg.addToolUseBlock(new ToolUseBlock(
+                                (String) tu.get("id"), (String) tu.get("name"), inputJson));
+                    }
+                }
+                return msg;
+            } else if ("user_tool_results".equals(messageType)) {
+                var results = (List<Map<String, Object>>) payload.get("toolResultBlocks");
+                if (results != null && !results.isEmpty()) {
+                    var blocks = new ArrayList<ToolResultBlock>();
+                    for (var tr : results) {
+                        blocks.add(new ToolResultBlock(
+                                (String) tr.get("toolUseId"),
+                                (String) tr.get("content"),
+                                Boolean.TRUE.equals(tr.get("isError"))));
+                    }
+                    return UserMessage.withToolResults(blocks);
+                }
+                return new UserMessage(sm.getContent());
+            } else {
+                return "user".equals(sm.getRole())
+                        ? new UserMessage(sm.getContent())
+                        : new AssistantMessage(sm.getContent());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to deserialize message payload, falling back to basic: {}", e.getMessage());
+            return "user".equals(sm.getRole())
+                    ? new UserMessage(sm.getContent())
+                    : new AssistantMessage(sm.getContent());
+        }
+    }
+
     // ---- Session management ----
 
     public SessionEntity newSession() {
@@ -401,18 +727,14 @@ public class QueryEngine {
     }
 
     public SessionEntity loadSession(String id) {
-        var session = sessionService.loadSession(id);
+        var session = sessionService.loadSessionWithMessages(id);
         if (session == null) return null;
         currentSession = session;
-
         var state = appStore.getState();
         state.clearMessages();
         for (var sm : session.getMessages()) {
-            if ("user".equals(sm.getRole())) {
-                state.addMessage(new UserMessage(sm.getContent()));
-            } else if ("assistant".equals(sm.getRole())) {
-                state.addMessage(new AssistantMessage(sm.getContent()));
-            }
+            Message msg = deserializeMessage(sm);
+            state.addMessage(msg);
         }
         return session;
     }

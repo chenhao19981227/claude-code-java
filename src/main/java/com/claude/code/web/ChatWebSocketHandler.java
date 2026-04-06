@@ -18,7 +18,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final QueryEngine queryEngine;
-
     private volatile WebSocketSession activeSession;
 
     public ChatWebSocketHandler(QueryEngine queryEngine) {
@@ -29,7 +28,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         activeSession = session;
         log.info("WebSocket client connected: {}", session.getRemoteAddress());
-        sendJson(session, "event", "connected", "model", queryEngine.getAppStore().getState().getMainLoopModel());
+        sendJson(session, "event", "connected", "model", queryEngine.getAppStore().getState().getMainLoopModel(),
+                "mode", queryEngine.getAgentMode());
         String sessionId = queryEngine.getCurrentSessionId();
         sendJson(session, "event", "session_info", "sessionId", sessionId != null ? sessionId : "");
     }
@@ -63,6 +63,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             case "list_sessions" -> handleListSessions(session);
             case "delete_session" -> handleDeleteSession(session, msg);
             case "rename_session" -> handleRenameSession(session, msg);
+            case "set_mode" -> handleSetMode(session, msg);
+            case "permission_response" -> handlePermissionResponse(msg);
             default -> sendToActive("event", "error", "error", "Unknown message type: " + type);
         }
     }
@@ -97,6 +99,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 String truncated = result.length() > 200 ? result.substring(0, 200) + "..." : result;
                 log.info("Tool result: {} {}", isError ? "ERROR " : "", truncated);
                 sendToActive("event", "tool_result", "toolUseId", toolUseId, "result", result, "isError", isError);
+            }
+
+            @Override public void onPermissionRequest(String requestId, String toolName, String description, String inputPreview) {
+                log.info("Permission request: {} - {}", toolName, description);
+                sendToActive("event", "permission_request", "requestId", requestId,
+                        "toolName", toolName, "description", description, "input", inputPreview);
             }
 
             @Override public void onError(String error) {
@@ -142,6 +150,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             if (sm.getReasoning() != null && !sm.getReasoning().isEmpty()) {
                 m.put("reasoning", sm.getReasoning());
             }
+            if (sm.getMessagePayload() != null && !sm.getMessagePayload().isEmpty()) {
+                m.put("messagePayload", sm.getMessagePayload());
+            }
             msgList.add(m);
         }
         var response = new java.util.LinkedHashMap<String, Object>();
@@ -183,6 +194,24 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } else {
             sendJson(session, "event", "error", "error", "Session not found: " + sessionId);
         }
+    }
+
+    private void handleSetMode(WebSocketSession session, Map<String, Object> msg) throws Exception {
+        String mode = String.valueOf(msg.get("mode"));
+        if (!"plan".equals(mode) && !"build".equals(mode)) {
+            sendJson(session, "event", "error", "error", "Invalid mode: " + mode + ". Use 'plan' or 'build'.");
+            return;
+        }
+        queryEngine.setAgentMode(mode);
+        log.info("Mode changed to: {}", mode);
+        sendJson(session, "event", "mode_changed", "mode", mode);
+    }
+
+    private void handlePermissionResponse(Map<String, Object> msg) {
+        String requestId = String.valueOf(msg.get("requestId"));
+        String action = String.valueOf(msg.get("action"));
+        log.info("Permission response: {} -> {}", requestId, action);
+        queryEngine.respondPermission(requestId, action);
     }
 
     private void sendToActive(Object... kvPairs) {

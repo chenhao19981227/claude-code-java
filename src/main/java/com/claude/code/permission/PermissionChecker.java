@@ -1,8 +1,7 @@
 package com.claude.code.permission;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Pattern;
 
 public class PermissionChecker {
@@ -18,6 +17,8 @@ public class PermissionChecker {
     private final List<PermissionRule> askRules = new ArrayList<>();
     private PermissionMode mode = PermissionMode.DEFAULT;
     private final String workingDirectory;
+    private String agentMode = "build"; // "plan" or "build"
+    private final Set<String> allowedAllTools = new HashSet<>();
 
     public PermissionChecker(String workingDirectory) {
         this.workingDirectory = workingDirectory != null ? workingDirectory : System.getProperty("user.dir");
@@ -26,15 +27,37 @@ public class PermissionChecker {
     public void setMode(PermissionMode mode) { this.mode = mode; }
     public PermissionMode getMode() { return mode; }
 
+    public void setAgentMode(String agentMode) { this.agentMode = agentMode; }
+    public String getAgentMode() { return agentMode; }
+
     public void addAllowRule(PermissionRule rule) { allowRules.add(rule); }
     public void addDenyRule(PermissionRule rule) { denyRules.add(rule); }
     public void addAskRule(PermissionRule rule) { askRules.add(rule); }
 
+    public void allowAllForTool(String toolName) { allowedAllTools.add(toolName); }
+    public boolean isAllowedAll(String toolName) { return allowedAllTools.contains(toolName); }
+
+    public void resetAllowedAll() { allowedAllTools.clear(); }
+
     public PermissionResult checkPermission(String toolName, String input, String filePath) {
+        // If user previously chose "Allow All" for this tool, auto-approve
+        if (allowedAllTools.contains(toolName)) {
+            return PermissionResult.allow(input, PermissionDecisionReason.mode("allow_all"));
+        }
+
+        // Plan mode: deny all non-read tools
+        if ("plan".equals(agentMode) && !isReadOnlyTool(toolName)) {
+            return PermissionResult.deny(
+                "Tool '" + toolName + "' is not allowed in Plan mode. Switch to Build mode to use write tools.",
+                PermissionDecisionReason.mode("plan"));
+        }
+
+        // Build mode: bypass rules still work
         if (mode.isBypass()) {
             return PermissionResult.allow(input, PermissionDecisionReason.mode("bypassPermissions"));
         }
 
+        // Check deny rules
         for (var rule : denyRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.deny(
@@ -43,6 +66,7 @@ public class PermissionChecker {
             }
         }
 
+        // Check ask rules
         for (var rule : askRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.ask(
@@ -51,17 +75,20 @@ public class PermissionChecker {
             }
         }
 
+        // Path safety check for non-read tools
         if (filePath != null && !isReadOnlyTool(toolName)) {
             PermissionResult safetyCheck = checkPathSafety(filePath);
             if (safetyCheck != null) return safetyCheck;
         }
 
+        // Check allow rules
         for (var rule : allowRules) {
             if (rule.matchesTool(toolName) && matchesContent(rule, input, filePath)) {
                 return PermissionResult.allow(input, PermissionDecisionReason.rule(rule.getRuleContent()));
             }
         }
 
+        // Default behavior based on mode
         return switch (mode) {
             case ACCEPT_EDITS -> PermissionResult.allow(input, PermissionDecisionReason.mode("acceptEdits"));
             case PLAN -> {
@@ -113,8 +140,16 @@ public class PermissionChecker {
         return null;
     }
 
+    /**
+     * Check if a tool is read-only. Uses the TOOL NAME (not class name).
+     * Read-only tools: Read, Glob, Grep, TodoWrite
+     */
     private boolean isReadOnlyTool(String toolName) {
-        return "FileReadTool".equals(toolName) || "GlobTool".equals(toolName) || "GrepTool".equals(toolName);
+        if (toolName == null) return false;
+        return switch (toolName) {
+            case "Read", "Glob", "Grep", "TodoWrite" -> true;
+            default -> false;
+        };
     }
 
     public boolean isInWorkingDirectory(String path) {
