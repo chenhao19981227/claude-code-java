@@ -21,6 +21,8 @@ public class AppState {
     private String sessionStartTime = String.valueOf(System.currentTimeMillis());
     private int totalInputTokens;
     private int totalOutputTokens;
+    private int lastInputTokens; // from most recent API call, used for compaction check
+    private boolean compacted; // flag to prevent re-compaction in same turn
 
     public AppState(AppProperties props) {
         this.mainLoopModel = props.getEffectiveModel();
@@ -59,4 +61,8 @@ public class AppState {
     public void addInputTokens(int tokens) { this.totalInputTokens += tokens; }
     public int getTotalOutputTokens() { return totalOutputTokens; }
     public void addOutputTokens(int tokens) { this.totalOutputTokens += tokens; }
+    public int getLastInputTokens() { return lastInputTokens; }
+    public void setLastInputTokens(int tokens) { this.lastInputTokens = tokens; }
+    public boolean isCompacted() { return compacted; }
+    public void setCompacted(boolean compacted) { this.compacted = compacted; }
 }

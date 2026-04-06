@@ -325,6 +325,19 @@ public class OpenAiCompatibleClient implements ApiClient {
 
     private void processEvent(JsonNode node, StreamListener listener) {
         try {
+            // Extract usage from top-level (OpenAI-compatible APIs include this in the final event)
+            if (node.has("usage")) {
+                JsonNode usageNode = node.get("usage");
+                if (usageNode != null && usageNode.has("prompt_tokens")) {
+                    int promptTokens = usageNode.has("prompt_tokens") ? usageNode.get("prompt_tokens").asInt() : 0;
+                    int completionTokens = usageNode.has("completion_tokens") ? usageNode.get("completion_tokens").asInt() : 0;
+                    int cacheRead = usageNode.has("prompt_tokens_details")
+                            && usageNode.get("prompt_tokens_details").has("cached_tokens")
+                            ? usageNode.get("prompt_tokens_details").get("cached_tokens").asInt() : 0;
+                    listener.onTokenUsage(new TokenUsage(promptTokens, completionTokens, cacheRead, 0));
+                }
+            }
+
             JsonNode choices = node.get("choices");
             if (choices == null || !choices.isArray() || choices.size() == 0) return;
             JsonNode choice = choices.get(0);

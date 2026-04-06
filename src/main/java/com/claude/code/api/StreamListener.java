@@ -10,6 +10,7 @@ public interface StreamListener {
     void onMessageDelta(Map<String, Object> data);
     void onMessageStop(Map<String, Object> data);
     void onReasoningDelta(String text);
+    void onTokenUsage(TokenUsage usage);
     void onError(Throwable error);
     void onComplete();
 }
